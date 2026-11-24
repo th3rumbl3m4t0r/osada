@@ -1,0 +1,66 @@
+<!DOCTYPE html>
+<!-- osada's office page (Round 18): osada's header (its x11 theme, the user's night/day and accent)
+     over the office suite, ZetaOffice (LibreOffice in WebAssembly).
+     Derived from zetajs's examples/web-office (MIT, allotropia). -->
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script>
+  // relative URLs need the folder's slash
+  if (!location.pathname.endsWith('/') && !location.pathname.endsWith('.html')) location.replace(location.pathname + '/' + location.search + location.hash);
+</script>
+<title>office</title>
+<link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="/static/x11.css">
+<script src="/static/x11.js"></script>
+<style>
+  html, body { height: 100%; }
+  body { display: flex; flex-direction: column; overflow: hidden; }
+  #topbar { flex: none; }
+  #topbar .doc { color: var(--fg); font-weight: bold; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 40vw; }
+  #topbar .doc small { color: var(--fg-dim); font-weight: normal; }
+  #msg { font-size: 12px; }
+  #msg.dim { color: var(--fg-dim); }
+  /* below the header: the office suite's own window */
+  .stage { position: relative; flex: 1; min-height: 0; background: #fff; border-top: 1px solid var(--border); }
+  #loading { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 14px; color: var(--fg-dim); background: var(--bg); text-align: center; padding: 20px; }
+  .spinner { width: 46px; height: 46px; border: 6px solid var(--border); border-top-color: var(--accent); border-radius: 50%; animation: spin 1.4s linear infinite; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  /* Qt wants the canvas with this id, no border nor padding (an outline is fine) */
+  #qtcanvas { border: 0 none; padding: 0; outline: none; width: 100%; height: 100%; visibility: hidden; display: block; }
+  /* the share dialog, as osada's */
+  .share-find { flex: 1; min-width: 18em; }
+  .share-results { border: 1px solid var(--accent); padding: 4px 8px 8px; margin: 4px 0 8px; }
+  td.mono, b.mono { font-family: monospace; }
+  .dlg-back { position: fixed; inset: 0; z-index: 100; background: rgba(0, 0, 0, .45); display: flex; align-items: flex-start; justify-content: center; padding: 12vh 10px 10px; }
+  .dlg { width: 760px; max-width: 100%; max-height: 80vh; display: flex; flex-direction: column; }
+  .dlg > .body { overflow: auto; min-height: 0; }
+  .dlg-buttons { display: flex; justify-content: flex-end; gap: 6px; padding: 8px 10px; border-top: 1px solid var(--border); }
+  .dlg-x { padding: 0 6px; font-size: 11px; }
+  .dlg .row { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; margin: 6px 0; }
+  .dlg .lbl { display: block; margin: 10px 0 3px; }
+  .dlg td.url { word-break: break-all; }
+  .dlg td.act { white-space: nowrap; text-align: right; }
+  .dlg input.num { width: 6em; }
+  .dim { color: var(--fg-dim); }
+</style>
+</head>
+<body>
+<header id="topbar"><div class="bar">
+  <a class="brand" href="/files/home/">osada <small>// office</small></a>
+  <span class="doc" id="name">office</span>
+  <span id="msg" class="dim"></span>
+  <span class="spacer"></span>
+  <button type="button" id="save" class="primary" disabled title="save it back to osada (LibreOffice's own save does the same)">save</button>
+  <button type="button" id="share" hidden title="share with users or by link">share</button>
+  <a id="back" class="btn-link" href="/">back to osada</a>
+  <span data-x11-controls></span>
+</div></header>
+<div class="stage" onselectstart="event.preventDefault()">
+  <div id="loading"><div class="spinner"></div><div id="loading-text">loading LibreOffice: about 52 MB the first time, kept by the browser after</div></div>
+  <canvas id="qtcanvas" contenteditable="true" oncontextmenu="event.preventDefault()" onkeydown="event.preventDefault()"></canvas>
+</div>
+<script src="office.js"></script>
+</body>
+</html>

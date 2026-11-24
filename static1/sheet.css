@@ -1,0 +1,3 @@
+/* spreadsheets (sheet.js, part sheet): the formula bar; the grid is csv.css */
+.sheet-bar .sheet-ref { min-width: 52px; font-family: var(--font-mono); color: var(--fg-dim); text-align: center; }
+.sheet-bar .sheet-fx { flex: 1; min-width: 120px; font-family: var(--font-mono); }

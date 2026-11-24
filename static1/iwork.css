@@ -1,0 +1,4 @@
+/* Apple iWork previews (iwork.js, part iwork) */
+.iwork-pdf iframe { flex: 1; border: 0; background: #fff; }
+.iwork-box { flex: 1; min-height: 0; overflow: auto; display: flex; align-items: center; justify-content: center; }
+.iwork-box > img { max-width: 100%; max-height: 100%; object-fit: contain; cursor: default; }

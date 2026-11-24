@@ -1,0 +1,6 @@
+/* images the browser cannot show itself (img.js, part img): one page at a time; a click: actual size */
+.img-host { overflow: hidden; }
+.img-box { flex: 1; min-height: 0; overflow: auto; display: flex; align-items: center; justify-content: center; }
+.img-box > img, .img-box > canvas { max-width: 100%; max-height: 100%; object-fit: contain; cursor: zoom-in; }
+.img-box.actual { display: block; }
+.img-box.actual > img, .img-box.actual > canvas { max-width: none; max-height: none; cursor: zoom-out; }

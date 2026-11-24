@@ -1,0 +1,15 @@
+## Round 18: containers of sites (podman, container_t) with osada folders: the folders are given
+## to them as they are (not relabelled, so osada keeps its own label on them). Only the folders a
+## container is given are in it; read only unless a folder is given to write (rw).
+## Loaded where podman runs and osada's files are (home): deploy/selinux/install.sh does it when
+## container-selinux is there.
+policy_module(osada-containers, 1.0)
+
+require {
+	type container_t;
+	type osada_data_t;
+}
+
+allow container_t osada_data_t:dir { getattr open read search ioctl lock add_name remove_name write reparent rmdir create setattr };
+allow container_t osada_data_t:file { getattr open read map ioctl lock append create write unlink rename setattr };
+allow container_t osada_data_t:lnk_file { getattr read };

@@ -1,0 +1,16 @@
+/* mail (mail.js, part mail): who and when, the headers, the attachments, the body */
+.mail-host { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+.mail-head { padding: 8px 12px; border-bottom: 1px solid var(--border); background: var(--panel); display: flex; flex-direction: column; gap: 2px; }
+.mail-subject { font-weight: bold; font-size: 15px; margin-bottom: 4px; overflow-wrap: anywhere; }
+.mail-h { display: flex; gap: 8px; }
+.mail-h .k, .mail-atts > .k { color: var(--fg-dim); min-width: 60px; }
+.mail-h .v { overflow-wrap: anywhere; }
+.mail-acts { margin-top: 4px; }
+.mail-acts button.on { background: var(--accent); color: var(--bg); }
+.mail-raw { max-height: 40vh; overflow: auto; margin: 4px 0 0; padding: 6px 8px; background: var(--bg); border: 1px solid var(--border); font-size: 11px; white-space: pre-wrap; overflow-wrap: anywhere; user-select: text; }
+.mail-atts { display: flex; flex-wrap: wrap; gap: 4px 12px; align-items: center; margin-top: 4px; }
+.mail-att { display: inline-flex; gap: 4px; align-items: center; }
+.mail-att button { padding: 0 5px; font-size: 11px; }
+.mail-body { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+.mail-frame { flex: 1; width: 100%; border: 0; background: #fff; }
+.mail-text { flex: 1; overflow: auto; margin: 0; padding: 10px 14px; white-space: pre-wrap; overflow-wrap: anywhere; user-select: text; }

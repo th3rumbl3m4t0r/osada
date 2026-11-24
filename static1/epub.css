@@ -1,0 +1,4 @@
+/* e-books (epub.js, part epub): the contents and chapter arrows over the page */
+.book-bar b { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 40%; }
+.book-bar select { max-width: 260px; }
+.book-frame { flex: 1; min-height: 0; width: 100%; border: 0; background: #fbfaf6; }

@@ -1,0 +1,4 @@
+/* the versions dialog (versions.js) */
+.versions .vlist { border: 1px solid var(--border); background: var(--bg); height: 320px; overflow: auto; }
+.versions .vlist > div { padding: 3px 8px; }
+.versions table.x11 td.nm { word-break: break-word; }

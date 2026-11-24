@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="en" data-files="{{files}}">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>osada 0.2 · {{node}}</title>
+<meta name="osada-node" content="{{node}}">
+<meta name="osada-cytoscape" content="{{cytoscape.js}}">
+<link rel="stylesheet" href="{{x11.css}}">
+<link rel="stylesheet" href="{{app.css}}">
+<script src="{{x11.js}}"></script>
+<script type="module" src="{{app.js}}"></script>
+</head>
+<body>
+<header id="topbar"><div class="bar">
+  <nav id="nav"></nav>
+  <span class="spacer"></span>
+  <span id="who" class="group"></span>
+  <span data-x11-controls></span>
+</div></header>
+<main id="app"></main>
+<footer class="statusbar">
+  <span id="status"></span>
+  <span class="spacer"></span>
+  <span>osada {{version}} · © 2026 th3rumbl3m4t0r · AGPL-3.0</span>
+</footer>
+</body>
+</html>

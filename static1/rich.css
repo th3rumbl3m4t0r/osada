@@ -1,0 +1,31 @@
+/* the document editor (rich.js, part rich): the toolbar, the page; headings in it */
+.rich-host, .rich-view { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+.rich-bar select { max-width: 150px; }
+.rich-bar .fmt-b { font-weight: bold; }
+.rich-bar .fmt-i { font-style: italic; }
+.rich-bar .fmt-u { text-decoration: underline; }
+.rich-bar .fmt-s { text-decoration: line-through; }
+.rich-wrap { flex: 1; min-height: 0; overflow: auto; background: var(--bg); padding: 14px; }
+.rich-page { max-width: 860px; min-height: 100%; margin: 0 auto; padding: 24px 32px; background: var(--panel); border: 1px solid var(--border);
+  outline: none; white-space: pre-wrap; overflow-wrap: break-word; font-size: 12pt; line-height: 1.35; font-family: sans-serif; }
+.rich-page p { margin: 0; }
+.rich-page h1, .rich-page h2, .rich-page h3, .rich-page h4, .rich-page h5, .rich-page h6 { margin: .6em 0 .3em; line-height: 1.2; }
+.rich-page h1 { font-size: 20pt; }
+.rich-page h2 { font-size: 16pt; }
+.rich-page h3 { font-size: 13pt; }
+.rich-page h4, .rich-page h5, .rich-page h6 { font-size: 12pt; }
+.rich-page ul, .rich-page ol { margin: 0; padding-left: 2em; }
+.rich-page img { max-width: 100%; }
+.rich-page hr { border: 0; border-top: 1px solid currentColor; }
+.rich-page a { color: var(--accent); }
+.rich-table { border-collapse: collapse; margin: 4px 0; }
+.rich-table td { border: 1px solid var(--border); padding: 2px 5px; vertical-align: top; min-width: 30px; }
+.rich-wrap.paper { background: #6b6b6b; }
+.rich-wrap.paper .rich-page { background: #fff; color: #111; border-color: #999; width: 21cm; max-width: 100%; min-height: 29.7cm; padding: 2cm; }
+.rich-wrap.paper .rich-page a { color: #1a4fb0; }
+.rich-wrap.paper .rich-table td { border-color: #777; }
+
+@media (max-width: 760px) {
+  .rich-wrap { padding: 4px; }
+  .rich-page { padding: 12px; }
+}

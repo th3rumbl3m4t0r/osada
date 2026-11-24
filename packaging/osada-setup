@@ -1,0 +1,645 @@
+#!/bin/bash
+# osada 0.2 on a new VM (systemd; RHEL/Rocky/Alma 9–10, Fedora, Debian 12+, Ubuntu 22.04+).
+# Run as root: osada-setup from the package (dnf install osada), or ./osada-setup in an unpacked
+# tarball; see INSTALL.md (/usr/share/doc/osada/INSTALL.md).
+#
+#   osada-setup first --name home [--edge [--public <address>] [--public-name osada.example.org]]
+#                [--http 0.0.0.0:8096] [--link 0.0.0.0:7441] [--issuer https://osada.example.org]
+#       a new cluster: this VM is its first node (sign-in, directory, files, every role); its
+#       first administrator is `admin` (password in /var/lib/osada/node/first-admin). The pages
+#       (plain http, for the local network) are on port 80 (8096 when 80 is taken), or on
+#       127.0.0.1:8096 when the VM has a public address (the internet uses an edge's https).
+#       --edge: this VM answers the public names too (a second node, `edge`, on 443/80, link
+#       7442; for one VM in the cloud); --public-name: a certificate for that name right away
+#   osada-setup token --name edge --at <the edge's address> [--roles edge-http,idp,store,blob,worker] [--hours 1]
+#       on the first node: a one-time token for another node to join; with --at, the first node
+#       dials that node (for the join and from then on), so the first node need not be reachable
+#   osada-setup node --name edge --token <token> [--edge] [--peer home@<host>:7441] [--link 0.0.0.0:7441]
+#       another VM joins the cluster: it waits for the first node to dial it (token --at), and with
+#       --peer it also dials the first node itself; --edge: it answers the public names (443, 80)
+#   osada-setup cert --names osada.example.org[,more.example.org] [--cert osada] [--issuer-node edge]
+#       on the first node: a certificate for the public names (Let's Encrypt), issued by an edge
+#       (by default the first edge it reaches) and copied to the others; as admin → nodes does
+#   osada-setup mail [--stalwart 0.16.27]
+#       on the mail host (a node with a public address): Stalwart, the mail server, with its web
+#       listeners on 127.0.0.1 (8080, 8443) and a credential for this node; then admin → modules:
+#       a module of kind mail on this node, and admin → mail manages domains and mailboxes
+#   osada-setup upgrade
+#       this package's binary in place of the installed one, and the services restarted
+#       (every node: the edges first, the first node last)
+#
+# Also: --selinux (load osada's SELinux module: osada runs confined), --firewall (open the ports
+# with firewalld), --no-start, --dry-run (show what would be done), --root <dir> (install into
+# a tree instead of /: for tests; no users, no services).
+# It makes and changes; it never deletes anything.
+set -euo pipefail
+HERE=$(cd "$(dirname "$0")" && pwd)
+# the program: the package's (/usr/bin/osada, dnf/apt), or this unpacked tarball's, installed as
+# /usr/local/bin/osada; how to call this script in what it prints
+if [ -x /usr/bin/osada ] && [ ! -e "$HERE/osada" ]; then
+    PACKAGED=1; BIN=/usr/bin/osada; SELF=osada-setup
+else
+    PACKAGED=0; BIN=/usr/local/bin/osada; SELF=./osada-setup
+fi
+cmd=${1:-}
+[ -n "$cmd" ] && shift || true
+
+NAME=""; HTTP=""; LINK="0.0.0.0:7441"; ISSUER=""; PEER=""; TOKEN=""; ROLES="edge-http,idp,store,blob,worker"; HOURS=1; AT=""; WAIT=30
+EDGE=0; SELINUX=0; FIREWALL=0; START=1; DRY=0; ROOT=""; PUBLIC=""; PUBLIC_NAME=""; NAMES=""; CERT=osada; CERT_ISSUER=""; EDGE_NAME=edge; STALWART=0.16.27
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --name) NAME=$2; shift 2 ;;
+        --http) HTTP=$2; shift 2 ;;
+        --link) LINK=$2; shift 2 ;;
+        --issuer) ISSUER=$2; shift 2 ;;
+        --peer) PEER=$2; shift 2 ;;
+        --token) TOKEN=$2; shift 2 ;;
+        --roles) ROLES=$2; shift 2 ;;
+        --hours) HOURS=$2; shift 2 ;;
+        --at) AT=$2; shift 2 ;;
+        --public) PUBLIC=$2; shift 2 ;;
+        --public-name) PUBLIC_NAME=$2; shift 2 ;;
+        --names) NAMES=$2; shift 2 ;;
+        --cert) CERT=$2; shift 2 ;;
+        --issuer-node) CERT_ISSUER=$2; shift 2 ;;
+        --edge-name) EDGE_NAME=$2; shift 2 ;;
+        --stalwart) STALWART=$2; shift 2 ;;
+        --wait) WAIT=$2; shift 2 ;;
+        --edge) EDGE=1; shift ;;
+        --selinux) SELINUX=1; shift ;;
+        --firewall) FIREWALL=1; shift ;;
+        --no-start) START=0; shift ;;
+        --dry-run) DRY=1; shift ;;
+        --root) ROOT=$(realpath -m "$2"); shift 2 ;;
+        *) echo "unknown option $1 (see the top of $0)" >&2; exit 2 ;;
+    esac
+done
+
+say() { printf '\033[1m%s\033[0m\n' "$*"; }
+run() {
+    echo "  + $*"
+    [ "$DRY" = 1 ] || "$@"
+}
+# a file with this content, when it is not there yet (an existing one is kept and said so)
+put() {
+    local path="$ROOT$1" mode=$2 content=$3
+    if [ -e "$path" ]; then
+        echo "  = $1 is there already: kept (the new one would be $1.new)"
+        [ "$DRY" = 1 ] || { printf '%s' "$content" > "$path.new"; chmod "$mode" "$path.new"; }
+        return
+    fi
+    echo "  + $1"
+    [ "$DRY" = 1 ] && return
+    mkdir -p "$(dirname "$path")"
+    printf '%s' "$content" > "$path"
+    chmod "$mode" "$path"
+}
+real() { [ -z "$ROOT" ] && [ "$DRY" = 0 ]; }
+# this VM's first public IPv4 on an interface (a cloud VM), if any
+public_addr() {
+    command -v ip >/dev/null || return 0
+    ip -o -4 addr show scope global 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | while read -r a; do
+        case "$a" in
+            10.*|127.*|169.254.*|192.168.*|172.1[6-9].*|172.2[0-9].*|172.3[01].*) continue ;;
+            100.6[4-9].*|100.[7-9][0-9].*|100.1[01][0-9].*|100.12[0-7].*) continue ;;
+        esac
+        echo "$a"
+        break
+    done
+}
+valid_hosts() { [[ "$1" =~ ^[a-z0-9]([a-z0-9.-]*[a-z0-9])?(,[a-z0-9]([a-z0-9.-]*[a-z0-9])?)*$ ]]; }
+# a certificate for host names, into node control (osada web import on the first node)
+cert_import() { # node folder, cert name, names (a,b), issuer node (may be empty)
+    local dir=$1 name=$2 names=$3 issuer=$4 json tmp
+    json="{\"certs\":{\"$name\":{\"names\":[\"${names//,/\",\"}\"]${issuer:+,\"issuer\":\"$issuer\"}}}}"
+    echo "  + osada web import (certs: $name = $names${issuer:+, issued by $issuer})"
+    [ "$DRY" = 1 ] && return 0
+    tmp=$(mktemp --suffix=.json /tmp/osada-cert.XXXXXX)
+    printf '%s\n' "$json" > "$tmp"
+    chmod 644 "$tmp"
+    rm -f "$dir/web-import.done" "$dir/web-import.failed"
+    runuser -u osada -- $BIN web import "$tmp" --data "$dir" >/dev/null
+    rm -f "$tmp"
+    for _ in $(seq 1 15); do
+        if [ -e "$dir/web-import.done" ]; then echo "  = $(cat "$dir/web-import.done")"; return 0; fi
+        if [ -e "$dir/web-import.failed" ]; then echo "  ! $(cat "$dir/web-import.failed")" >&2; return 1; fi
+        sleep 1
+    done
+    echo "  ! the node did not take it within 15 s (journalctl -u osada)" >&2
+    return 1
+}
+port_of() { echo "${1##*:}"; }
+valid_name() { [[ "$1" =~ ^[a-z][a-z0-9-]{0,31}$ ]]; }
+
+need_root() {
+    if [ -z "$ROOT" ] && [ "$DRY" = 0 ] && [ "$(id -u)" != 0 ]; then
+        echo "run it as root (or with --dry-run, --root <dir>)" >&2
+        exit 1
+    fi
+}
+
+check_binary() {
+    local b=$BIN
+    [ "$PACKAGED" = 1 ] || b=$HERE/osada
+    if ! "$b" version >/dev/null 2>&1; then
+        echo "the osada binary does not run here (it needs glibc 2.34 or newer, x86_64)" >&2
+        exit 1
+    fi
+    "$b" version | sed -n 1p
+}
+
+install_binary() {
+    if [ "$PACKAGED" = 1 ]; then
+        echo "  = the program: $BIN (the package's)"
+        return
+    fi
+    say "the program: $BIN"
+    run mkdir -p "$ROOT/usr/local/bin"
+    run install -m 755 "$HERE/osada" "$ROOT$BIN"
+}
+
+make_user() { # user home
+    if [ -n "$ROOT" ]; then
+        echo "  (--root: no account $1; its folder $2)"
+        run mkdir -p "$ROOT$2"
+        return
+    fi
+    if id "$1" >/dev/null 2>&1; then
+        echo "  = account $1 is there"
+    else
+        local nologin=/usr/sbin/nologin
+        [ -x "$nologin" ] || nologin=/sbin/nologin
+        run useradd --system --home-dir "$2" --create-home --shell "$nologin" "$1"
+    fi
+    run install -d -m 750 -o "$1" -g "$1" "$2"
+}
+
+open_ports() { # "8096/tcp 7441/udp …" or services "http https"
+    [ "$FIREWALL" = 1 ] || { echo "  (ports to open, unless --firewall: $*)"; return; }
+    if ! command -v firewall-cmd >/dev/null || ! firewall-cmd --state >/dev/null 2>&1; then
+        echo "  firewalld is not running here: nothing to open on this VM. If your provider has a"
+        echo "  firewall of its own (a cloud firewall, a security group), allow there: $*"
+        return
+    fi
+    for p in "$@"; do
+        case "$p" in
+            */*) run firewall-cmd --permanent --add-port="$p" ;;
+            *) run firewall-cmd --permanent --add-service="$p" ;;
+        esac
+    done
+    run firewall-cmd --reload
+}
+
+selinux_module() { # data folder
+    [ "$SELINUX" = 1 ] || return 0
+    if [ "$PACKAGED" = 1 ] || [ ! -e "$HERE/selinux/osada.te" ]; then
+        echo "  --selinux: osada's SELinux module is not part of this release yet; osada runs"
+        echo "  unconfined (unconfined_service_t), which works with SELinux enforcing"
+        return 0
+    fi
+    if ! command -v getenforce >/dev/null || [ "$(getenforce)" = Disabled ]; then
+        echo "  SELinux is off here: nothing to load"
+        return 0
+    fi
+    say "SELinux: osada's module (osada runs confined as osada_t)"
+    if [ ! -e /usr/share/selinux/devel/Makefile ]; then
+        echo "  it needs selinux-policy-devel (dnf install selinux-policy-devel), then run this again" >&2
+        exit 1
+    fi
+    local tmp=/tmp/osada-selinux.XXXX
+    [ "$DRY" = 1 ] || tmp=$(mktemp -d)
+    run cp "$HERE/selinux/osada.te" "$HERE/selinux/osada.fc" "$HERE/selinux/osada.if" "$tmp/"
+    run make -C "$tmp" -f /usr/share/selinux/devel/Makefile osada.pp
+    run semodule -i "$tmp/osada.pp"
+    semanage fcontext -l -C 2>/dev/null | grep -qF "$1(/.*)?" || run semanage fcontext -a -t osada_data_t "$1(/.*)?"
+    semanage port -l -C 2>/dev/null | grep -q '^osada_link_port_t' || run semanage port -a -t osada_link_port_t -p udp "$(port_of "$LINK")"
+    run restorecon -RF "$BIN" /etc/osada "$1"
+}
+
+start_units() {
+    if [ "$START" = 0 ] || ! real; then
+        echo "  (not started: systemctl daemon-reload; systemctl enable --now $*)"
+        return
+    fi
+    run systemctl daemon-reload
+    run systemctl enable --now "$@"
+}
+
+case "$cmd" in
+first)
+    need_root
+    valid_name "$NAME" || { echo "--name: the node's name, small letters, digits and - (e.g. home)" >&2; exit 2; }
+    check_binary
+    pub=$(public_addr)
+    if [ "$EDGE" = 1 ]; then
+        PUBLIC=${PUBLIC:-$pub}
+        [ -n "$PUBLIC" ] || { echo "--edge: this VM has no public IPv4 on an interface; give the address the internet reaches it at: --public <address>" >&2; exit 2; }
+        [ "$(port_of "$LINK")" != 7442 ] || { echo "--edge: the edge's link is 7442; give the first node another (--link)" >&2; exit 2; }
+        pub=$PUBLIC
+    fi
+    if [ -z "$HTTP" ]; then
+        # a VM the internet reaches: its plain-http pages on this VM only (the edge does https)
+        if [ -n "$pub" ]; then
+            HTTP=127.0.0.1:8096
+            echo "  this VM is reached at $pub: the pages (plain http) on 127.0.0.1:8096 only;"
+            echo "  from outside through an edge (https), or now: ssh -L 8096:127.0.0.1:8096 root@$pub"
+        elif command -v ss >/dev/null && ss -Hltn 'sport = :80' 2>/dev/null | grep -q .; then
+            HTTP=0.0.0.0:8096
+            echo "  port 80 is taken on this machine: the pages (plain http, the local network) on 8096"
+        else
+            # the local network's way in: plain http on the usual port
+            HTTP=0.0.0.0:80
+        fi
+    fi
+    if [ -n "$PUBLIC_NAME" ]; then
+        valid_hosts "$PUBLIC_NAME" || { echo "--public-name: host names (a,b), small letters" >&2; exit 2; }
+        [ "$EDGE" = 1 ] || { echo "--public-name needs --edge here (else: $SELF cert --names … once an edge is there)" >&2; exit 2; }
+    fi
+    say "a new cluster; this VM is its first node, $NAME"
+    install_binary
+    make_user osada /var/lib/osada
+    env_file="# osada 0.2 (osada-setup first, $(date -u +%F))
+# the data: files, the wiki, the node's logs and the cluster's
+OSADA_DATA=/var/lib/osada
+# the pages and the API: plain http for the local network (the internet: an edge's https)
+OSADA_BIND=$HTTP
+# the links between nodes (UDP; other nodes dial it, or this node dials them: OSADA_PEERS)
+OSADA_LINK_BIND=$LINK
+# this node's name (people see it; its id is a GUID made at the first start)
+OSADA_NODE=$NAME
+"
+    [ -n "$ISSUER" ] && env_file+="# where programs signing in with osada (OpenID Connect) find it
+OSADA_OIDC_ISSUER=$ISSUER
+"
+    [ -n "$PEER" ] && env_file+="# nodes this one dials (an edge reachable from here): name@host:port, space-separated
+OSADA_PEERS=$PEER
+"
+    say "the settings: /etc/osada/osada.env"
+    put /etc/osada/osada.env 640 "$env_file"
+    real && chgrp osada /etc/osada/osada.env 2>/dev/null || true
+    say "the services"
+    port=$(port_of "$HTTP")
+    caps=""
+    [ "$port" -lt 1024 ] 2>/dev/null && caps="AmbientCapabilities=CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+"
+    put /etc/systemd/system/osada.service 644 "[Unit]
+Description=osada 0.2 ($NAME, the first node)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=osada
+EnvironmentFile=/etc/osada/osada.env
+ExecStart=$BIN serve
+${caps}NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ReadWritePaths=/var/lib/osada
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
+"
+    put /etc/systemd/system/osada-web-agent.service 644 "[Unit]
+Description=osada web agent: containers of sites and disks of this node (root)
+After=network-online.target osada.service
+Wants=network-online.target
+
+[Service]
+ExecStart=$BIN web-agent --data /var/lib/osada/node
+Restart=on-failure
+RestartSec=5
+# podman leaves the containers' conmon in this service's cgroup: restarting the agent (an
+# upgrade) must not take the sites' containers with it
+KillMode=process
+
+[Install]
+WantedBy=multi-user.target
+"
+    selinux_module /var/lib/osada
+    say "ports"
+    case "$HTTP" in
+        127.*|localhost:*|\[::1\]:*) open_ports "$(port_of "$LINK")/udp" ;;
+        *) open_ports "$port/tcp" "$(port_of "$LINK")/udp" ;;
+    esac
+    say "start"
+    start_units osada.service osada-web-agent.service
+    host=$(hostname -I 2>/dev/null | awk '{print $1}')
+    admin_file=/var/lib/osada/node/first-admin
+    if real && [ "$START" = 1 ]; then
+        for _ in $(seq 1 30); do [ -e "$admin_file" ] && break; sleep 1; done
+        [ -e "$admin_file" ] || echo "  (no $admin_file yet: journalctl -u osada says why)"
+    fi
+    if [ "$EDGE" = 1 ]; then
+        say "the edge on this VM: node $EDGE_NAME (443, 80; its link on 7442, which this node dials at $PUBLIC)"
+        if real && [ "$START" = 1 ]; then
+            tok=$(runuser -u osada -- $BIN token --data /var/lib/osada/node --node "$EDGE_NAME" --roles "$ROLES" --hours 1 --dial "$PUBLIC:7442" 2>/dev/null)
+            [ -n "$tok" ] || { echo "  no token for the edge (journalctl -u osada)" >&2; exit 1; }
+            fw=(); [ "$FIREWALL" = 1 ] && fw=(--firewall)
+            OSADA_INSTALL_NESTED=1 "$0" node --name "$EDGE_NAME" --token "$tok" --edge --link 0.0.0.0:7442 --wait 5 "${fw[@]}" | sed 's/^/  │ /'
+            if [ -n "$PUBLIC_NAME" ]; then
+                say "a certificate for $PUBLIC_NAME (issued by $EDGE_NAME once DNS points at $PUBLIC)"
+                for _ in $(seq 1 30); do
+                    runuser -u osada -- $BIN dial --data /var/lib/osada/node 2>/dev/null | grep -q "^$PUBLIC:7442 .* [0-9a-f-]\{36\}$" && break
+                    sleep 1
+                done
+                cert_import /var/lib/osada/node "$CERT" "$PUBLIC_NAME" "$EDGE_NAME" || true
+            fi
+        else
+            echo "  (not now: --no-start or a dry run)"
+        fi
+    fi
+    say "next"
+    if [ "$EDGE" = 1 ]; then
+        echo "  1. DNS: ${PUBLIC_NAME:-your public name} → $PUBLIC (A record; AAAA for its IPv6 too)"
+        if [ -n "$PUBLIC_NAME" ]; then
+            echo "  2. within minutes of DNS answering: https://${PUBLIC_NAME%%,*}/ — sign in as admin; the password: cat $admin_file"
+        else
+            echo "  2. a certificate: $SELF cert --names <your public name> (or admin → nodes → certificates)"
+            echo "     then https://<that name>/ — sign in as admin; the password: cat $admin_file"
+        fi
+        echo "  3. more edges (other VMs): here $SELF token --name <name> --at <its address>"
+    else
+        case "$HTTP" in
+            127.*|localhost:*|\[::1\]:*)
+                echo "  1. the pages: ssh -L 8096:127.0.0.1:8096 root@${pub:-<this VM>}, then http://localhost:8096/;" ;;
+            *)
+                echo "  1. open http://${host:-<this VM>}$( [ "$port" = 80 ] || echo ":$port")/ (from the local network);" ;;
+        esac
+        echo "     sign in as admin; the password: cat $admin_file (change it on the account page)"
+        echo "  2. an edge (a VM with a public address): here $SELF token --name edge --at <its address>,"
+        echo "     then on that VM the $SELF node … line it prints"
+        echo "  3. DNS for your public name at the edges; then $SELF cert --names <that name> here"
+        echo "     (or admin → nodes → certificates); admin → dns shows what DNS says"
+    fi
+    ;;
+token)
+    need_root
+    valid_name "$NAME" || { echo "--name: the new node's name" >&2; exit 2; }
+    env_file="$ROOT/etc/osada/osada.env"
+    [ -r "$env_file" ] || { echo "no $env_file: run this on the first node" >&2; exit 1; }
+    data=$(sed -n 's/^OSADA_DATA=//p' "$env_file" | tail -1)
+    data="$ROOT${data:-/var/lib/osada}"
+    lport=$(sed -n 's/^OSADA_LINK_BIND=//p' "$env_file" | tail -1)
+    lport=$(port_of "${lport:-$LINK}")
+    dial=()
+    if [ -n "$AT" ]; then
+        case "$AT" in
+            \[*\]:*) at=$AT ;;                       # [v6]:port
+            *:*:*) at="[$AT]:$lport" ;;               # a bare IPv6 address
+            *:*) at=$AT ;;                            # host:port
+            *) at="$AT:$lport" ;;
+        esac
+        dial=(--dial "$at")
+    fi
+    # the token alone on stdout (T=$($SELF token …)); the rest on stderr
+    say "a one-time token for $NAME (roles $ROLES), valid $HOURS h" >&2
+    if [ -n "$ROOT" ] || [ "$(id -un)" = osada ]; then
+        tok=$("$ROOT$BIN" token --data "$data/node" --node "$NAME" --roles "$ROLES" --hours "$HOURS" "${dial[@]}" 2>/dev/null)
+    else
+        tok=$(runuser -u osada -- $BIN token --data "$data/node" --node "$NAME" --roles "$ROLES" --hours "$HOURS" "${dial[@]}" 2>/dev/null)
+    fi
+    [ -n "$tok" ] || { echo "no token made (is osada running here? journalctl -u osada)" >&2; exit 1; }
+    echo "$tok"
+    me=$(hostname -I 2>/dev/null | awk '{print $1}')
+    {
+        if [ -n "$AT" ]; then
+            echo "  this node now dials $NAME at $at (and keeps doing so: osada dial --data $data/node lists it)"
+        else
+            echo "  without --at, $NAME must reach this node itself (--peer); for an edge, --at <its address> is simpler"
+        fi
+        say "on $NAME, in the unpacked package, as root:"
+        edge=""
+        [[ ",$ROLES," == *,edge-http,* ]] && edge=" --edge"
+        echo "  $SELF node --name $NAME --token $tok$edge --firewall$( [ -z "$AT" ] && echo " --peer home@${me:-<this node>}:$lport")"
+    } >&2
+    ;;
+node)
+    need_root
+    valid_name "$NAME" || { echo "--name: this node's name, as in the token" >&2; exit 2; }
+    [ -n "$TOKEN" ] || { echo "--token is needed ($SELF token --name $NAME --at <this VM's address> on the first node)" >&2; exit 2; }
+    check_binary
+    say "$NAME joins the cluster${PEER:+ (dialing $PEER too)}"
+    install_binary
+    make_user osada-node /var/lib/osada-node
+    # the link port first: the first node dials it for the join
+    say "ports"
+    if [ "$EDGE" = 1 ]; then open_ports http https "$(port_of "$LINK")/udp"; else open_ports "$(port_of "$LINK")/udp"; fi
+    data="$ROOT/var/lib/osada-node/node"
+    join=(join --node "$NAME" --token "$TOKEN" --listen "$LINK" --wait "$WAIT")
+    [ -n "$PEER" ] && join+=(--peer "$PEER")
+    shown="--node $NAME --token … --listen $LINK${PEER:+ --peer $PEER}"
+    say "the join"
+    if [ -e "$data/store.db" ]; then
+        echo "  = $data has a node already: not joined again"
+    elif [ "$DRY" = 1 ]; then
+        echo "  + osada join --data /var/lib/osada-node/node $shown"
+    else
+        if [ -n "$ROOT" ]; then
+            echo "  + osada join --data $data $shown"
+            "$ROOT$BIN" "${join[@]}" --data "$data"
+        else
+            echo "  + osada join --data /var/lib/osada-node/node $shown"
+            echo "  (the first node dials this VM at UDP $(port_of "$LINK") when its token was made with --at; up to $WAIT min)"
+            runuser -u osada-node -- $BIN "${join[@]}" --data /var/lib/osada-node/node
+        fi
+    fi
+    relay=""
+    caps=""
+    if [ "$EDGE" = 1 ]; then
+        relay=" \\
+    --relay [::]:443 --relay-http [::]:80"
+        caps="AmbientCapabilities=CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+"
+    fi
+    say "the services"
+    put /etc/systemd/system/osada-node.service 644 "[Unit]
+Description=osada 0.2 node $NAME$( [ "$EDGE" = 1 ] && echo ': the public names, relayed to the nodes that answer them' )
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=osada-node
+ExecStart=$BIN serve --data /var/lib/osada-node/node --listen $LINK${PEER:+ --peer ${PEER#*@}}$relay
+${caps}NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ReadWritePaths=/var/lib/osada-node
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
+"
+    put /etc/systemd/system/osada-node-web-agent.service 644 "[Unit]
+Description=osada web agent: containers of sites and disks of node $NAME (root)
+After=network-online.target osada-node.service
+Wants=network-online.target
+
+[Service]
+ExecStart=$BIN web-agent --data /var/lib/osada-node/node
+Restart=on-failure
+RestartSec=5
+# podman leaves the containers' conmon in this service's cgroup: restarting the agent (an
+# upgrade) must not take the sites' containers with it
+KillMode=process
+
+[Install]
+WantedBy=multi-user.target
+"
+    say "start"
+    start_units osada-node.service osada-node-web-agent.service
+    [ -n "${OSADA_INSTALL_NESTED:-}" ] && exit 0
+    say "next"
+    echo "  admin → nodes: $NAME is there. Once the first node reaches it, its link address (and for an"
+    echo "  edge its public IPv4) are filled in; add an IPv6 address on its card if it has one"
+    if [ "$EDGE" = 1 ]; then
+        echo "  it gets a copy of every certificate; point the public names' DNS at this VM too (admin → dns)"
+    fi
+    ;;
+cert)
+    need_root
+    [ -n "$NAMES" ] && valid_hosts "$NAMES" || { echo "--names: the host names, a,b (small letters)" >&2; exit 2; }
+    [[ "$CERT" =~ ^[a-z0-9-]+$ ]] || { echo "--cert: a-z, 0-9 and -" >&2; exit 2; }
+    env_file="$ROOT/etc/osada/osada.env"
+    [ -r "$env_file" ] || { echo "no $env_file: run this on the first node" >&2; exit 1; }
+    data=$(sed -n 's/^OSADA_DATA=//p' "$env_file" | tail -1)
+    say "certificate $CERT for $NAMES"
+    cert_import "${data:-/var/lib/osada}/node" "$CERT" "$NAMES" "$CERT_ISSUER"
+    echo "  the issuer asks Let's Encrypt within a minute, once DNS points the names at the edges;"
+    echo "  admin → nodes → certificates shows its state"
+    ;;
+mail)
+    need_root
+    real || { echo "mail: not with --root or --dry-run" >&2; exit 2; }
+    if [ -e /var/lib/osada-node/node/store.db ]; then ndata=/var/lib/osada-node/node; nuser=osada-node
+    elif [ -e /var/lib/osada/node/store.db ]; then ndata=/var/lib/osada/node; nuser=osada
+    else echo "no osada node on this VM: install one first (node --edge, or first --edge)" >&2; exit 1; fi
+    command -v python3 >/dev/null || { echo "it needs python3: dnf install -y python3" >&2; exit 1; }
+    say "Stalwart $STALWART, the mail server, for the node in $ndata"
+    id stalwart >/dev/null 2>&1 || run useradd --system --home-dir /opt/stalwart --shell /usr/sbin/nologin stalwart
+    run install -d -o stalwart -g stalwart -m 750 /opt/stalwart /opt/stalwart/bin /opt/stalwart/data /opt/stalwart/etc /opt/stalwart/logs
+    if [ -x /opt/stalwart/bin/stalwart ]; then
+        echo "  = /opt/stalwart/bin/stalwart is there ($(/opt/stalwart/bin/stalwart --version 2>/dev/null)): kept"
+    else
+        tmp=$(mktemp -d)
+        url="https://github.com/stalwartlabs/stalwart/releases/download/v$STALWART/stalwart-$(uname -m)-unknown-linux-gnu.tar.gz"
+        echo "  + $url"
+        curl -fsSL --max-time 300 -o "$tmp/s.tgz" "$url" || { echo "  ! the download failed" >&2; rm -rf "$tmp"; exit 1; }
+        tar xzf "$tmp/s.tgz" -C "$tmp"
+        run install -o stalwart -g stalwart -m 755 "$tmp/stalwart" /opt/stalwart/bin/stalwart
+        rm -rf "$tmp"
+    fi
+    put /opt/stalwart/etc/config.json 640 '{"@type":"RocksDb","path":"/opt/stalwart/data"}
+'
+    if [ ! -e /opt/stalwart/etc/stalwart.env ]; then
+        echo "  + /opt/stalwart/etc/stalwart.env (its recovery administrator, 0600)"
+        (umask 077; printf 'STALWART_RECOVERY_ADMIN=admin:%s\n' "$(head -c 24 /dev/urandom | base64 | tr -d '/+=')" > /opt/stalwart/etc/stalwart.env)
+    fi
+    chown stalwart:stalwart /opt/stalwart/etc/config.json /opt/stalwart/etc/stalwart.env
+    put /etc/systemd/system/stalwart.service 644 "[Unit]
+Description=Stalwart, the mail server (osada's mail instance)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=stalwart
+EnvironmentFile=-/opt/stalwart/etc/stalwart.env
+ExecStart=/opt/stalwart/bin/stalwart --config=/opt/stalwart/etc/config.json
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+Restart=on-failure
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target
+"
+    run systemctl daemon-reload
+    run systemctl enable --now stalwart.service
+    for _ in $(seq 1 30); do ss -Hltn 'sport = :8080' | grep -q . && break; sleep 1; done
+    say "its web listeners on 127.0.0.1 (the edge has 443; https reaches it through the edge), this node's credential"
+    STALWART_NODE_DATA=$ndata STALWART_NODE_USER=$nuser python3 -I - <<'EOF' || exit 1
+import base64, json, os, pwd, urllib.request
+cred = [l.split("=", 1)[1].strip() for l in open("/opt/stalwart/etc/stalwart.env") if l.startswith("STALWART_RECOVERY_ADMIN=")][0]
+auth = "Basic " + base64.b64encode(cred.encode()).decode()
+def req(method, url, body=None):
+    r = urllib.request.Request(url, method=method, headers={"Authorization": auth, "Content-Type": "application/json"},
+                               data=None if body is None else json.dumps(body).encode())
+    with urllib.request.urlopen(r, timeout=20) as f:
+        return json.loads(f.read())
+for base in ("http://127.0.0.1:8080", "http://[::1]:8080"):
+    try:
+        s = req("GET", base + "/jmap/session"); break
+    except OSError:
+        s = None
+if s is None:
+    raise SystemExit("  ! Stalwart does not answer on 8080: journalctl -u stalwart")
+acct = s["primaryAccounts"].get("urn:stalwart:jmap") or next(iter(s["accounts"]))
+api = base + "/" + s["apiUrl"].split("://", 1)[-1].split("/", 1)[1]
+def call(m, a):
+    a["accountId"] = acct
+    return req("POST", api, {"using": ["urn:ietf:params:jmap:core", "urn:stalwart:jmap"], "methodCalls": [[m, a, "0"]]})["methodResponses"][0][1]
+want = {"http": "127.0.0.1:8080", "https": "127.0.0.1:8443"}
+upd = {l["id"]: {"bind": {want[l["name"]]: True}} for l in call("x:NetworkListener/get", {}).get("list", [])
+       if l.get("name") in want and list(l.get("bind", {})) != [want[l["name"]]]}
+if upd:
+    r = call("x:NetworkListener/set", {"update": upd})
+    if r.get("notUpdated"):
+        raise SystemExit(f"  ! the listeners: {r['notUpdated']}")
+    print("  + listeners http 127.0.0.1:8080, https 127.0.0.1:8443")
+d, u = os.environ["STALWART_NODE_DATA"], pwd.getpwnam(os.environ["STALWART_NODE_USER"])
+os.makedirs(d + "/mail", mode=0o700, exist_ok=True)
+os.chown(d + "/mail", u.pw_uid, u.pw_gid)
+f = d + "/mail/stalwart.auth"
+if not os.path.exists(f):
+    fd = os.open(f, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    os.write(fd, (auth + "\n").encode()); os.close(fd)
+    os.chown(f, u.pw_uid, u.pw_gid)
+    print(f"  + {f} (0600, the node's credential for Stalwart)")
+else:
+    print(f"  = {f} is there: kept")
+EOF
+    run systemctl restart stalwart.service
+    say "ports"
+    open_ports 25/tcp 465/tcp 587/tcp 993/tcp
+    say "next"
+    echo "  1. admin → modules: a module of kind mail on this node, host mail.<your domain>,"
+    echo "     upstream tls://127.0.0.1:8443 (the edge passes https for that name to Stalwart)"
+    echo "  2. admin → mail: add your domain; its card has the DNS records to publish (MX → mail.<domain>,"
+    echo "     DKIM, SPF, DMARC); A/AAAA of mail.<domain> → this VM"
+    echo "  3. many providers block port 25 until asked: check yours"
+    echo "  Stalwart's own administrator: /opt/stalwart/etc/stalwart.env (STALWART_RECOVERY_ADMIN)"
+    ;;
+upgrade)
+    need_root
+    if [ "$PACKAGED" = 1 ]; then
+        # dnf upgrade osada put the new program in place (and restarted what runs); again here
+        echo "  the program: $($BIN version | sed -n 1p) (the package's; dnf upgrade osada brings a new one)"
+    else
+        check_binary
+        [ -n "$ROOT" ] || [ -x "$BIN" ] || { echo "no $BIN here: install first (first, node)" >&2; exit 1; }
+        [ -n "$ROOT" ] || echo "  was: $(sha256sum "$BIN" | cut -c1-16), now: $(sha256sum "$HERE/osada" | cut -c1-16)"
+        install_binary
+    fi
+    units=()
+    for u in osada osada-node osada-web-agent osada-node-web-agent; do
+        [ -e "$ROOT/etc/systemd/system/$u.service" ] && units+=("$u.service")
+    done
+    say "restart: ${units[*]:-nothing}"
+    if real && [ ${#units[@]} -gt 0 ]; then
+        run systemctl daemon-reload
+        run systemctl restart "${units[@]}"
+        sleep 3
+        for u in "${units[@]}"; do echo "  $u: $(systemctl is-active "$u")"; done
+    fi
+    ;;
+*)
+    sed -n '2,/^set -euo/p' "$0" | grep '^#' | sed 's/^# \{0,1\}//'
+    exit 2
+    ;;
+esac

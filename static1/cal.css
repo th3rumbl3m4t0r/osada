@@ -1,0 +1,15 @@
+/* calendars and contacts (cal.js, part cal) */
+.cal-list, .card-list { flex: 1; min-height: 0; overflow: auto; padding: 4px 12px 16px; }
+.cal-day { margin: 14px 0 4px; font-size: 13px; color: var(--accent); border-bottom: 1px solid var(--border); padding-bottom: 2px; }
+.cal-item { display: flex; gap: 12px; padding: 4px 0; }
+.cal-time { min-width: 110px; flex: none; }
+.cal-body { display: flex; flex-direction: column; gap: 2px; min-width: 0; overflow-wrap: anywhere; }
+.cal-off b { text-decoration: line-through; }
+.cal-text { white-space: pre-wrap; overflow-wrap: anywhere; margin-top: 2px; user-select: text; }
+.card-list { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 10px; align-content: start; padding-top: 12px; }
+.card { display: flex; gap: 10px; padding: 8px; border: 1px solid var(--border); background: var(--panel); min-width: 0; }
+.card .card-pic { width: 56px; height: 56px; max-width: none; max-height: none; flex: none; object-fit: cover; cursor: default; }
+.card-initial { display: flex; align-items: center; justify-content: center; font-size: 24px; background: var(--accent-soft); }
+.card-body { display: flex; flex-direction: column; gap: 2px; min-width: 0; overflow-wrap: anywhere; user-select: text; }
+.card-row { display: flex; gap: 8px; }
+.card-row > .dim { min-width: 60px; flex: none; }

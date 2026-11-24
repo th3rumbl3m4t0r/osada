@@ -1,0 +1,30 @@
+/* the pictures metaplace (pictures.js): month headers over square tiles; the slideshow over everything */
+.picwin { display: flex; flex-direction: column; min-height: 0; min-width: 0; }
+.picwrap { flex: 1; min-height: 0; overflow: auto; outline: none; position: relative; padding: 0 6px 8px; }
+.pic-month { position: sticky; top: 0; z-index: 1; background: var(--panel); color: var(--accent); padding: 8px 2px 4px; font-size: 11px; letter-spacing: 1px; }
+.pic-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(110px, 1fr)); gap: 3px; }
+.pic { display: block; aspect-ratio: 1; overflow: hidden; background: var(--panel-2); }
+.pic img { display: block; width: 100%; height: 100%; object-fit: cover; }
+.pic:hover, .pic:focus { outline: 2px solid var(--accent); outline-offset: -2px; }
+.pic.broken { display: flex; align-items: center; justify-content: center; padding: 4px; font-size: 10px; color: var(--fg-dim); text-decoration: none; word-break: break-all; }
+.slides { position: fixed; inset: 0; z-index: 90; display: flex; flex-direction: column; background: #000; }
+.slide-bar { display: flex; flex-wrap: wrap; gap: 4px 10px; align-items: center; padding: 4px 8px; background: var(--titlebar); border-bottom: 1px solid var(--border); flex: none; }
+.slide-bar .spacer { flex: 1; }
+.slide-bar button, .slide-bar .btn-link { padding: 1px 6px; font-size: 11px; }
+.slide-bar button.on { background: var(--accent); color: var(--bg); border-color: var(--accent); }
+.slide-count { color: var(--accent); }
+.slide-name { color: var(--fg); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 40ch; }
+.slide-dir { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 50ch; font-size: 11px; }
+.slide-stage { flex: 1; min-height: 0; position: relative; display: flex; align-items: center; justify-content: center; touch-action: pinch-zoom; user-select: none; }
+.slide-img { max-width: 100%; max-height: 100%; object-fit: contain; }
+.slide-msg { position: absolute; }
+.slide-go { position: absolute; top: 0; bottom: 0; width: 18%; border: 0; background: transparent; color: transparent; font-size: 28px; }
+.slide-go:hover { background: transparent; color: var(--accent); }
+.slide-go.prev { left: 0; text-align: left; padding-left: 14px; }
+.slide-go.next { right: 0; text-align: right; padding-right: 14px; }
+
+@media (max-width: 760px) {
+  .pic-grid { grid-template-columns: repeat(auto-fill, minmax(80px, 1fr)); gap: 2px; }
+  .slide-dir, .slide-act { display: none; }
+  .slide-go { width: 25%; }
+}

@@ -1,0 +1,15 @@
+/opt/osada/target/release/osada	--	gen_context(system_u:object_r:osada_exec_t,s0)
+# cargo hard-links the binary here too; both names need the same label
+/opt/osada/target/release/deps/osada-[0-9a-f]+	--	gen_context(system_u:object_r:osada_exec_t,s0)
+# osada 0.2's binary (osada.service.d/0.2.conf points the unit at it)
+/opt/osada-0.2/osada	--	gen_context(system_u:object_r:osada_exec_t,s0)
+/opt/osada/deploy/osada-tunnel	--	gen_context(system_u:object_r:osada_tunnel_exec_t,s0)
+/opt/osada/android/serve\.py	--	gen_context(system_u:object_r:osada_apk_exec_t,s0)
+
+/etc/osada(/.*)?			gen_context(system_u:object_r:osada_conf_t,s0)
+/etc/osada/tunnel_.*	--	gen_context(system_u:object_r:osada_tunnel_key_t,s0)
+
+/srv/osada-apk(/.*)?			gen_context(system_u:object_r:osada_apk_content_t,s0)
+
+# /home/osada (osada_data_t) is a semanage rule in install.sh: the home
+# directory rules in file_contexts.homedirs win over a line here
