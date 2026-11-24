@@ -184,7 +184,7 @@ let mine = null;
 
 async function route() {
   // the first time: the header's place at once, the page waits for home's answer
-  if (!me && !$nav.childElementCount) $nav.append(h('a', { href: '/', class: 'portal' }, 'portal'), h('span', { class: 'nodename dim' }, '// …'));
+  if (!me && !$nav.childElementCount) $nav.append(h('a', { href: '/', class: 'portal' }, 'osada'), h('span', { class: 'nodename dim' }, '// …'));
   try { me = await api('GET', '/api/account'); } catch (e) {
     me = null;
     if (homeAway) {
@@ -235,10 +235,10 @@ function topbar() {
   $who.replaceChildren();
   if (!me) return;
   const at = location.pathname;
-  $nav.append(h('a', { href: '/', 'data-go': true, class: 'portal' + (at === '/' ? ' on' : '') }, 'portal'),
-    // the node this page came from (T14), as osada 0.1's "// home"
-    h('span', { class: 'nodename dim', title: me.via ? `you are connected to ${me.via_name || me.via}, which relays to ${me.node_name || me.node}, the node that answers` : 'the node you are connected to, which answers' },
-      '// ' + (me.via ? `${me.via_name || me.via} → ${me.node_name || me.node}` : (me.node_name || me.node))));
+  $nav.append(h('a', { href: '/', 'data-go': true, class: 'portal' + (at === '/' ? ' on' : '') }, 'osada'),
+    // the instance (Round 24: "osada // <instance>"); the nodes this page came through in its title (T14)
+    h('span', { class: 'nodename dim', title: me.via ? `you are connected to node ${me.via_name || me.via}, which relays to node ${me.node_name || me.node}, which answers` : `you are connected to node ${me.node_name || me.node}, which answers` },
+      '// ' + (me.instance || me.node_name || me.node)));
   const apps = (mine && mine.apps) || [];
   for (const a of apps) {
     $nav.append(a.external ? h('a', { href: a.href, target: '_blank', rel: 'noopener', class: 'app' }, a.title)
@@ -1033,7 +1033,61 @@ function accountPage() {
     win('password', pw),
     win('second factor', tf, tmsg, h('p', { class: 'dim' }, 'TOTP: six digits from an authenticator app.')),
     win('security keys (FIDO2)', keysBox(), h('p', { class: 'dim' }, 'A security key or passkey signs you in with your password; in a tier-0 OU it is the only second factor taken. It works over https at a name (not at an address).')),
+    mailPasswordsWin(),
   ), win(`sessions on node ${me.node_name || me.node}`, caution, sessions.node));
+}
+
+/// Passwords for mail programs (Round 24): the mail server signs people in through osada, so
+/// IMAP, SMTP, CalDAV and CardDAV programs use app passwords the account makes here (the
+/// mail server makes the secret; it is shown once). Hidden when there is no mail server, no
+/// mailbox, or this node has no mail part (the answer is not the list then).
+function mailPasswordsWin() {
+  const box = h('div', { class: 'stack' });
+  const msg = h('div', { class: 'msg' });
+  const w = win('mail programs', box, msg);
+  w.id = 'mail-passwords';
+  w.hidden = true;
+  const bad = err => { msg.className = 'msg bad'; msg.textContent = err.message; };
+  const show = async fresh => {
+    let d;
+    try { d = await api('GET', '/api/account/mail-passwords'); } catch (err) {
+      if (err.status === 502 || err.status === 400) { w.hidden = false; box.replaceChildren(); bad(err); }
+      return;
+    }
+    if (!d || d.available !== true || !Array.isArray(d.list)) return;
+    w.hidden = false;
+    const name = h('input', { placeholder: 'its name (phone, laptop)', maxlength: 80 });
+    const make = async () => {
+      try {
+        const r = await api('POST', '/api/account/mail-passwords', { description: name.value });
+        msg.className = 'msg'; msg.textContent = '';
+        await show(r);
+      } catch (err) { bad(err); }
+    };
+    name.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); make(); } });
+    const secret = fresh ? h('div', { class: 'msg ok fresh-secret' },
+      `The password for “${fresh.description}”, shown only now: type or paste it into the program. `,
+      h('code', { class: 'secret' }, fresh.secret), ' ',
+      h('button', { type: 'button', onclick: () => navigator.clipboard && navigator.clipboard.writeText(fresh.secret) }, 'copy')) : null;
+    const host = d.host || '—';
+    box.replaceChildren(
+      h('p', { class: 'dim' }, 'Mail programs (a phone, Thunderbird, Outlook) do not sign in with your osada password: give each its own app password, and revoke it when the program is gone.'),
+      secret,
+      h('dl', { class: 'kv' },
+        h('dt', {}, 'user name'), h('dd', {}, h('code', {}, d.login || '—')),
+        h('dt', {}, 'IMAP'), h('dd', {}, h('code', {}, host), ', port 993, SSL/TLS'),
+        h('dt', {}, 'SMTP'), h('dd', {}, h('code', {}, host), ', port 465 SSL/TLS, or 587 STARTTLS'),
+        h('dt', {}, 'calendar, contacts'), h('dd', {}, h('code', {}, `https://${host}/`), ' (CalDAV, CardDAV)')),
+      d.list.length ? h('ul', { class: 'keys' }, d.list.map(p => h('li', { class: 'row' },
+        h('b', {}, p.description || 'app password'),
+        h('span', { class: 'dim' }, p.created ? ' made ' + new Date(p.created).toLocaleDateString() : ''),
+        h('button', { type: 'button', class: 'danger', onclick: () => confirmModal('revoke the app password', `Revoke “${p.description}”? Mail programs using it are refused from then on.`, async () => {
+          try { await api('DELETE', '/api/account/mail-passwords/' + encodeURIComponent(p.id)); msg.textContent = ''; await show(); } catch (err) { bad(err); }
+        }) }, 'revoke')))) : h('p', {}, 'No app passwords yet.'),
+      h('div', { class: 'row' }, name, h('button', { type: 'button', class: 'primary', id: 'make-mail-password', onclick: make }, 'make one')));
+  };
+  show();
+  return w;
 }
 
 /// The account's FIDO2 keys: listed, added, taken off.
@@ -1641,15 +1695,48 @@ function federationTab() {
         h('dt', {}, 'UPN domain'), h('dd', {}, h('span', { class: 'row' }, upn, h('button', { type: 'button', onclick: () => mailAct({ op: 'upn_domain', domain: upn.value.trim() }, 'UPN domain saved') }, 'save'))),
         h('dt', {}, 'others find it at'), h('dd', {}, h('code', {}, f.discovery || '—')),
         h('dt', {}, 'anyone may ask'), h('dd', {}, h('code', {}, f.who || '—'), h('span', { class: 'dim' }, ' yes or no, for one exact UPN; 20 questions a minute from an address')),
-        h('dt', {}, 'shares'), h('dd', {}, `${f.incoming} from people there, ${f.outgoing} to people there`)),
+        h('dt', {}, 'shares'), h('dd', {}, `${f.incoming} from people there, ${f.outgoing} to people there`),
+        // Round 24: open federation, here (the owner)
+        h('dt', {}, 'open federation'), h('dd', {}, openSwitch(f))),
         h('p', { class: 'dim' }, 'Every account is also name@<UPN domain>: it signs in with that or its name, the share window and other instances know it by it, and with a mailbox it is an address of the mailbox too (mail arrives once the domain has its MX record).')),
-      win('federated instances',
-        h('p', { class: 'dim' }, 'Both sides add each other. Then people here find people there by their UPN in the share window and share with them, view only; each instance signs what it asks the other.'),
+      f.open ? blockedWin(f) : win('federated instances',
+        h('p', { class: 'dim' }, 'Both sides add each other. Then people here find people there by their UPN in the share window and share with them, view only; each instance signs what it asks the other. Open federation (above) lets every instance in instead, but those blocked.'),
         g.node, h('div', { class: 'row' }, url, h('button', { type: 'button', class: 'primary', onclick: async () => {
           try { await api('POST', '/api/federation/peers', { url: url.value.trim() }); status('added', 'ok'); drawAdmin(); } catch (err) { status(err.message, 'bad'); }
         } }, 'add'))));
   });
 }
+
+/// Open federation's switch (Round 24): on, every osada instance may federate but those blocked.
+function openSwitch(f) {
+  const open = h('input', { type: 'checkbox' });
+  open.checked = !!f.open;
+  open.onchange = async () => {
+    try { await api('POST', '/api/federation/settings', { open: open.checked }); status(open.checked ? 'open federation on' : 'open federation off', 'ok'); drawAdmin(); }
+    catch (err) { open.checked = !open.checked; status(err.message, 'bad'); }
+  };
+  return h('label', { class: 'row' }, open, h('span', { class: 'dim' },
+    'every osada instance may find people here by their UPN and share with them, but those blocked (off: only the instances listed, each side adding the other)'));
+}
+
+/// Open federation's list (Round 24): the instances blocked; a name blocks its subdomains too.
+function blockedWin(f) {
+  const host = h('input', { placeholder: 'osada.example.org', spellcheck: false, size: 36 });
+  const g = grid({
+    id: 'fed-blocked', sort: 'host', empty: 'none blocked',
+    rows: (f.blocked || []).map(x => ({ host: x })),
+    columns: [{ key: 'host', label: 'instance (and its subdomains)', cell: b => h('b', {}, b.host) },
+      { key: 'act', label: '', value: () => '', cell: b => h('button', { type: 'button', onclick: async () => {
+        try { await api('DELETE', '/api/federation/blocked/' + encodeURIComponent(b.host)); drawAdmin(); } catch (err) { status(err.message, 'bad'); }
+      } }, 'unblock') }],
+  });
+  return win('blocked instances',
+    h('p', { class: 'dim' }, 'Open federation is on: every osada instance may find people here by their UPN and share with them, but these.'),
+    g.node, h('div', { class: 'row' }, host, h('button', { type: 'button', class: 'danger', onclick: async () => {
+      try { await api('POST', '/api/federation/blocked', { host: host.value.trim() }); status('blocked', 'ok'); drawAdmin(); } catch (err) { status(err.message, 'bad'); }
+    } }, 'block')));
+}
+
 
 // ---- tables and pickers over the node's data (a page at a time) ----
 
@@ -2723,7 +2810,8 @@ async function nodeMap(box, info, ov) {
     // room for the boxes and the links' labels between them
     layout: nodes.length > 2 ? { name: 'circle', padding: 30, avoidOverlap: true, nodeDimensionsIncludeLabels: true, spacingFactor: 1.35 }
       : { name: 'grid', padding: 30, avoidOverlap: true, avoidOverlapPadding: 120, nodeDimensionsIncludeLabels: true },
-    wheelSensitivity: 0.3,
+    // Round 24: a mouse wheel's notch zooms noticeably (0.3 was slow with many nodes)
+    wheelSensitivity: 1.5,
     style: [
       { selector: 'node', style: { shape: 'round-rectangle', width: 'data(bw)', height: 'data(bh)', 'background-color': panel, 'border-width': 2, 'border-color': accent,
         label: 'data(label)', 'text-wrap': 'wrap', 'text-max-width': 240, 'text-valign': 'center', 'text-halign': 'center', color: fg, 'font-size': 11, 'font-family': 'monospace' } },
@@ -2735,6 +2823,13 @@ async function nodeMap(box, info, ov) {
     ],
   });
   g.on('tap', 'edge', e => { tip.textContent = e.target.data('title'); });
+  // the link clicked (selected): its numbers readable at any zoom (Round 24)
+  const readable = () => {
+    const px = Math.max(10, Math.round(13 / g.zoom()));
+    g.edges().forEach(x => x.selected() ? x.style({ 'font-size': px, 'text-background-opacity': 1, 'z-index': 10 }) : x.removeStyle('font-size text-background-opacity z-index'));
+  };
+  g.on('select unselect', 'edge', readable);
+  g.on('zoom', () => { if (g.edges(':selected').length) readable(); });
   g.on('tap', 'node', e => { const i = info[e.target.id()] || {}; tip.textContent = `${nodeLabel(e.target.id())}: ${i.error ? 'no answer: ' + i.error : `${i.host || ''}, osada ${i.version || '?'}, load ${i.load && i.load.length ? i.load[0].toFixed(2) : '?'} / ${i.cpus || '?'} CPUs`}\nmodules: ${e.target.data('mods')}`; });
   if (!edges.length) tip.textContent = 'No link has been counted yet: the nodes sample their links every 10 s.';
 }

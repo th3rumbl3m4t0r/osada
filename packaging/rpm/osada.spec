@@ -1,5 +1,5 @@
-# osada's RPM (EL9, EL10). The binary is built beforehand (packaging/build-rpms.sh, on EL9: glibc
-# 2.34, so the same one runs on 9 and 10); Source0 has it with osada-setup and the docs.
+# osada's RPM (EL9, EL10, Fedora). The binary is built beforehand (packaging/build-repo.sh, on EL9:
+# glibc 2.34, so the same one runs everywhere); Source0 has it with osada-setup and the docs.
 %global debug_package %{nil}
 %global __strip /bin/true
 
@@ -19,7 +19,9 @@ Requires:       util-linux
 Requires:       iproute
 Requires:       hostname
 Requires:       curl
-Recommends:     firewalld
+# not Recommends: a firewalld pulled in is enabled by the preset and would start, closed, at
+# the next boot on a VM that had none
+Suggests:       firewalld
 Suggests:       podman
 
 %description
@@ -35,9 +37,10 @@ Requires:       stalwart >= 0.16
 Requires:       python3
 
 %description mail
-Pulls in Stalwart (the mail and groupware server) and what osada-setup mail needs to set it up
-behind an osada node: its listeners on 127.0.0.1, a credential for the node; osada then keeps
-its domains and mailboxes (admin -> mail).
+Pulls in Stalwart (the mail and groupware server), the webmail (maildot) and what osada-setup
+mail needs to set it all up behind an osada node: Stalwart's name, domain, Let's Encrypt, DKIM,
+the webmail signing in with osada, and the mail instance in the cluster; osada then keeps the
+mailboxes (admin -> mail).
 
 %prep
 %setup -q
@@ -49,6 +52,7 @@ install -Dm644 INSTALL.md %{buildroot}%{_docdir}/osada/INSTALL.md
 install -Dm644 README.md %{buildroot}%{_docdir}/osada/README.md
 install -Dm644 LICENSE %{buildroot}%{_licensedir}/osada/LICENSE
 install -Dm644 mail.txt %{buildroot}%{_docdir}/osada-mail/README
+install -Dm644 -t %{buildroot}%{_datadir}/osada maildot-webmail-*.zip
 
 %preun
 %systemd_preun osada.service osada-web-agent.service osada-node.service osada-node-web-agent.service
@@ -66,7 +70,16 @@ install -Dm644 mail.txt %{buildroot}%{_docdir}/osada-mail/README
 
 %files mail
 %doc %{_docdir}/osada-mail/README
+%dir %{_datadir}/osada
+%{_datadir}/osada/maildot-webmail-*.zip
 
 %changelog
+* Tue Nov 24 2026 osada <packages@repo.th3rumbl3.com> - 0.2.0-3
+- osada-setup mail sets up mail whole (webmail included); nodes anywhere, named anything; the
+  header reads osada // <instance>; open federation; default OUs
+
+* Tue Nov 24 2026 osada <packages@repo.th3rumbl3.com> - 0.2.0-2
+- Fedora; osada-setup --firewall also with ufw; firewalld only suggested
+
 * Tue Nov 24 2026 osada <packages@repo.th3rumbl3.com> - 0.2.0-1
 - the first packages: osada (the program and osada-setup) and osada-mail (Stalwart)

@@ -183,9 +183,9 @@ function paintTop() {
   if (S.me.apps) {
     const brand = $('.brand');
     if (brand) brand.hidden = true;
-    nav.appendChild(h('a', { href: '/', text: 'portal', class: 'portal', 'data-sec': 'portal' }));
-    // the node this page came from (T14): "// home"
-    nav.appendChild(h('span', { class: 'nodename dim', title: tx('the node you are connected to'), text: '// ' + (S.me.node_name || S.me.host || '') }));
+    nav.appendChild(h('a', { href: '/', text: 'osada', class: 'portal', 'data-sec': 'portal' }));
+    // the instance (Round 24: "osada // <instance>"); the node in its title (T14)
+    nav.appendChild(h('span', { class: 'nodename dim', title: tx('the node you are connected to') + ': ' + (S.me.node_name || S.me.host || ''), text: '// ' + (S.me.instance || S.me.node_name || S.me.host || '') }));
     for (const a of S.me.apps) {
       if (a.external) nav.appendChild(h('a', { href: a.href, text: a.title, target: '_blank', rel: 'noopener', 'data-sec': a.name, class: 'app' }));
       else nav.appendChild(h('a', { href: a.href, text: a.name === 'files' || a.name === 'shared' || a.name === 'links' || a.name === 'wiki' ? tx(a.name) : a.title,

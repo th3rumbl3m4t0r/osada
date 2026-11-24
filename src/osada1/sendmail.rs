@@ -41,7 +41,7 @@ fn err_of(v: &Value) -> Option<String> {
         if r[0] == "error" {
             return Some(format!("{}: {}", r[1]["type"].as_str().unwrap_or("error"), r[1]["description"].as_str().unwrap_or("")));
         }
-        for k in ["notCreated", "notUpdated"] {
+        for k in ["notCreated", "notUpdated", "notDestroyed"] {
             if let Some(m) = r[1][k].as_object().filter(|m| !m.is_empty()) {
                 let (_, e) = m.iter().next().unwrap_or((&String::new(), &Value::Null)).clone();
                 return Some(format!("{}: {}", e["type"].as_str().unwrap_or("not done"), e["description"].as_str().unwrap_or("")));
@@ -51,40 +51,59 @@ fn err_of(v: &Value) -> Option<String> {
     None
 }
 
+/// A JMAP session at the mail server as a person: a short token osada signs for the webmail's
+/// client with the scope asked for, then the session's API address and accounts. (Round 24: the
+/// sending above and the mail app passwords, apppw.rs, both speak through it.)
+pub struct Jmap {
+    http: reqwest::Client,
+    api: String,
+    token: String,
+    pub session: Value,
+}
+
+impl Jmap {
+    pub async fn open(app: &App, user: &User, scope: &str) -> Result<Jmap, String> {
+        let base = base(app).ok_or("there is no mail server")?;
+        let token = oidc::mint_access(app, user, CLIENT, scope, 300).map_err(|e| format!("{e:?}"))?;
+        let http = reqwest::Client::builder().timeout(std::time::Duration::from_secs(20)).build().map_err(|e| e.to_string())?;
+        let r = http.get(format!("{base}/.well-known/jmap")).bearer_auth(&token).send().await.map_err(|e| format!("the mail server: {e}"))?;
+        let r = r.error_for_status().map_err(|e| format!("the mail server: {e}"))?;
+        let session: Value = serde_json::from_slice(&r.bytes().await.map_err(|e| e.to_string())?).map_err(|e| format!("the mail server's session: {e}"))?;
+        let api = session["apiUrl"].as_str().ok_or("the mail server gave no JMAP address")?.to_string();
+        Ok(Jmap { http, api, token, session })
+    }
+
+    /// The person's account for the first of `caps` the session names.
+    pub fn account(&self, caps: &[&str]) -> Option<String> {
+        caps.iter().find_map(|c| self.session["primaryAccounts"][*c].as_str()).map(str::to_string)
+    }
+
+    /// One request; a method's error, or something not created, updated or destroyed, in words.
+    pub async fn call(&self, using: &[&str], calls: Value) -> Result<Value, String> {
+        let body = json!({ "using": using, "methodCalls": calls });
+        let r = self.http.post(&self.api).bearer_auth(&self.token).header("content-type", "application/json").body(body.to_string()).send().await.map_err(|e| e.to_string())?;
+        let r = r.error_for_status().map_err(|e| e.to_string())?;
+        let v: Value = serde_json::from_slice(&r.bytes().await.map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
+        match err_of(&v) {
+            Some(e) => Err(e),
+            None => Ok(v),
+        }
+    }
+}
+
 /// Sends `l` from `user`'s mailbox; an error says why not (in words for the page).
 pub async fn send_as(app: &App, user: &User, display: &str, l: &Letter) -> Result<(), String> {
-    let base = base(app).ok_or("there is no mail server to send through")?;
+    base(app).ok_or("there is no mail server to send through")?;
     let from = from_address(app, user).ok_or("you have no mailbox to send it from")?;
-    let token = oidc::mint_access(app, user, CLIENT, "openid email", 300).map_err(|e| format!("{e:?}"))?;
-    let http = reqwest::Client::builder().timeout(std::time::Duration::from_secs(20)).build().map_err(|e| e.to_string())?;
-    let r = http.get(format!("{base}/.well-known/jmap")).bearer_auth(&token).send().await.map_err(|e| format!("the mail server: {e}"))?;
-    let r = r.error_for_status().map_err(|e| format!("the mail server: {e}"))?;
-    let session: Value = serde_json::from_slice(&r.bytes().await.map_err(|e| e.to_string())?).map_err(|e| format!("the mail server's session: {e}"))?;
-    let api = session["apiUrl"].as_str().ok_or("the mail server gave no JMAP address")?.to_string();
-    let account = session["primaryAccounts"]["urn:ietf:params:jmap:submission"]
-        .as_str()
-        .or(session["primaryAccounts"]["urn:ietf:params:jmap:mail"].as_str())
-        .ok_or("no mail account at the mail server")?
-        .to_string();
-    let using = json!(["urn:ietf:params:jmap:core", "urn:ietf:params:jmap:mail", "urn:ietf:params:jmap:submission"]);
-    let call = |calls: Value| {
-        let body = json!({ "using": using, "methodCalls": calls });
-        let (http, api, token) = (http.clone(), api.clone(), token.clone());
-        async move {
-            let r = http.post(api).bearer_auth(token).header("content-type", "application/json").body(body.to_string()).send().await.map_err(|e| e.to_string())?;
-            let r = r.error_for_status().map_err(|e| e.to_string())?;
-            let v: Value = serde_json::from_slice(&r.bytes().await.map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
-            match err_of(&v) {
-                Some(e) => Err(e),
-                None => Ok(v),
-            }
-        }
-    };
-    let v = call(json!([
-        ["Identity/get", { "accountId": account }, "i"],
-        ["Mailbox/get", { "accountId": account, "properties": ["role", "name"] }, "m"],
-    ]))
-    .await?;
+    let j = Jmap::open(app, user, "openid email").await?;
+    let account = j.account(&["urn:ietf:params:jmap:submission", "urn:ietf:params:jmap:mail"]).ok_or("no mail account at the mail server")?;
+    const USING: &[&str] = &["urn:ietf:params:jmap:core", "urn:ietf:params:jmap:mail", "urn:ietf:params:jmap:submission"];
+    let v = j
+        .call(USING, json!([
+            ["Identity/get", { "accountId": account }, "i"],
+            ["Mailbox/get", { "accountId": account, "properties": ["role", "name"] }, "m"],
+        ]))
+        .await?;
     let ids = v["methodResponses"][0][1]["list"].as_array().cloned().unwrap_or_default();
     let identity = ids
         .iter()
@@ -101,7 +120,7 @@ pub async fn send_as(app: &App, user: &User, display: &str, l: &Letter) -> Resul
     if let Some(s) = &sent {
         after[format!("mailboxIds/{s}")] = json!(true);
     }
-    call(json!([
+    j.call(USING, json!([
         ["Email/set", { "accountId": account, "create": { "e": {
             "mailboxIds": { drafts.clone(): true }, "keywords": { "$draft": true, "$seen": true },
             "from": [{ "name": display, "email": from }], "to": [{ "email": l.to }], "subject": l.subject,

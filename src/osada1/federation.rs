@@ -87,6 +87,9 @@ pub fn routes() -> Router<Arc<App>> {
         .route("/api/federation", get(admin_view))
         .route("/api/federation/peers", post(add_peer))
         .route("/api/federation/peers/{host}", delete(remove_peer))
+        .route("/api/federation/settings", post(set_open))
+        .route("/api/federation/blocked", post(block))
+        .route("/api/federation/blocked/{host}", delete(unblock))
 }
 
 /* ---- this instance, the peers ---- */
@@ -125,10 +128,97 @@ fn save_peers(app: &App, list: &[Peer]) -> Res<()> {
     db::set_setting(&app.db, "fed_peers", &serde_json::to_string(list).map_err(AppError::internal)?)
 }
 
-/// The federated instance whose UPNs `upn` is one of.
-pub fn peer_for(app: &App, upn: &str) -> Option<Peer> {
+/* ---- open federation (Round 24) ---- */
+
+/// Open federation (admin → settings): every osada may federate with this one but those blocked;
+/// off, only the instances listed (admin → federation), both sides adding each other.
+pub fn open(app: &App) -> bool {
+    db::get_setting(&app.db, "fed_open").ok().flatten().as_deref() == Some("1")
+}
+
+/// The blocked instances of open federation: host names; a name blocks its subdomains too.
+pub fn blocked(app: &App) -> Vec<String> {
+    db::get_setting(&app.db, "fed_blocked").ok().flatten().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default()
+}
+
+fn host_of(at: &str) -> &str {
+    at.split("://").nth(1).unwrap_or(at)
+}
+
+fn is_blocked(app: &App, at: &str) -> bool {
+    let h = host_of(at).to_ascii_lowercase();
+    open(app) && blocked(app).iter().any(|b| h == *b || h.ends_with(&format!(".{b}")))
+}
+
+/// An address an instance not listed may have: https://<host name>, its every address public (a
+/// stranger's request must not make this instance fetch from its own networks).
+async fn open_base_ok(at: &str) -> bool {
+    let Some(host) = at.strip_prefix("https://") else { return false };
+    if host.is_empty() || host.contains(['/', '?', '#', '@', ':']) || !host.contains('.') || host.parse::<IpAddr>().is_ok() {
+        return false;
+    }
+    match tokio::net::lookup_host((host, 443u16)).await {
+        Ok(a) => {
+            let ips: Vec<IpAddr> = a.map(|x| x.ip()).collect();
+            !ips.is_empty() && ips.iter().all(crate::exposure::is_public)
+        }
+        Err(_) => false,
+    }
+}
+
+/// An instance not listed (open federation), from its discovery; what was found is kept ten minutes.
+async fn open_peer(app: &App, at: &str) -> Option<Peer> {
+    if !open(app) || is_blocked(app, at) || base(app).as_deref() == Some(at) {
+        return None;
+    }
+    static FOUND: OnceLock<Mutex<HashMap<String, (Instant, Option<Peer>)>>> = OnceLock::new();
+    let cache = FOUND.get_or_init(Default::default);
+    if let Some((t, p)) = cache.lock().unwrap_or_else(|e| e.into_inner()).get(at) {
+        if t.elapsed() < Duration::from_secs(600) {
+            return p.clone();
+        }
+    }
+    let found = async {
+        if !open_base_ok(at).await {
+            return None;
+        }
+        let doc = discover(at).await.ok()?;
+        let upn_domain = doc["upn_domain"].as_str()?.to_ascii_lowercase();
+        let api = doc["api"].as_str()?.to_string();
+        let host = host_of(at).to_ascii_lowercase();
+        // its people's domain is its own name or one above it: nobody speaks for another's people
+        let owns = host == upn_domain || host.ends_with(&format!(".{upn_domain}"));
+        (owns && api.starts_with(&format!("{at}/")) && upn_domain != users::upn_domain(app))
+            .then(|| Peer { base: at.to_string(), upn_domain, api, added: now(), by: "open federation".into() })
+    }
+    .await;
+    let mut c = cache.lock().unwrap_or_else(|e| e.into_inner());
+    if c.len() > 1000 {
+        c.clear();
+    }
+    c.insert(at.to_string(), (Instant::now(), found.clone()));
+    found
+}
+
+/// The instance at `at`: listed, or found (open federation); none when blocked.
+async fn peer_at(app: &App, at: &str) -> Option<Peer> {
+    if is_blocked(app, at) {
+        return None;
+    }
+    match peers(app).into_iter().find(|p| p.base == at) {
+        Some(p) => Some(p),
+        None => open_peer(app, at).await,
+    }
+}
+
+/// The federated instance whose UPNs `upn` is one of: listed, or (open federation) the one at the
+/// domain's own name.
+pub async fn peer_for(app: &App, upn: &str) -> Option<Peer> {
     let dom = upn.rsplit_once('@')?.1.to_ascii_lowercase();
-    peers(app).into_iter().find(|p| p.upn_domain == dom)
+    if let Some(p) = peers(app).into_iter().find(|p| p.upn_domain == dom) {
+        return (!is_blocked(app, &p.base)).then_some(p);
+    }
+    open_peer(app, &format!("https://{dom}")).await.filter(|p| p.upn_domain == dom)
 }
 
 fn http() -> &'static reqwest::Client {
@@ -210,10 +300,7 @@ async fn verify(app: &App, method: &Method, uri: &Uri, headers: &HeaderMap, body
         return Err(unauth("not a signed request"));
     }
     let iss = claims["iss"].as_str().unwrap_or("");
-    let peer = peers(app)
-        .into_iter()
-        .find(|p| p.base == iss)
-        .ok_or_else(|| refused(StatusCode::FORBIDDEN, format!("this instance does not federate with {iss}")))?;
+    let peer = peer_at(app, iss).await.ok_or_else(|| refused(StatusCode::FORBIDDEN, format!("this instance does not federate with {iss}")))?;
     let me = base(app).ok_or_else(|| refused(StatusCode::NOT_FOUND, "no federation here"))?;
     let t = now();
     let (iat, exp) = (claims["iat"].as_i64().unwrap_or(0), claims["exp"].as_i64().unwrap_or(0));
@@ -548,7 +635,7 @@ async fn s_raw(State(app): State<Arc<App>>, Path(id): Path<i64>, Query(q): Query
 /// Shares the user's item with `to`, someone of a federated instance: view-only.
 pub async fn offer(app: &App, user: &User, t: &Target, is_dir: bool, to: &str) -> Res<Value> {
     let to = to.trim().trim_start_matches('<').trim_end_matches('>').to_lowercase();
-    let peer = peer_for(app, &to).ok_or_else(|| AppError::bad(format!("{to}: no federated instance has that domain")))?;
+    let peer = peer_for(app, &to).await.ok_or_else(|| AppError::bad(format!("{to}: no federated instance has that domain")))?;
     if t.group.is_some() {
         return Err(AppError::bad("a group's folder is not shared with other instances (yet): share it from your own files"));
     }
@@ -609,11 +696,11 @@ pub fn out_for_item(app: &App, owner: i64, mount: Option<i64>, path: &str) -> Re
 
 /// The share window's second step: is `q`, an address at a federated instance's domain, someone there?
 pub async fn search(app: &App, q: &str) -> (Vec<Value>, &'static str) {
-    let list = peers(app);
-    if list.is_empty() {
+    if peers(app).is_empty() && !open(app) {
         return (Vec::new(), "none");
     }
-    let Some(peer) = peer_for(app, q).filter(|_| crate::directory::valid_address(q)) else { return (Vec::new(), "on") };
+    let found = if crate::directory::valid_address(q) { peer_for(app, q).await } else { None };
+    let Some(peer) = found else { return (Vec::new(), "on") };
     static ASKED: OnceLock<Mutex<HashMap<String, (Instant, bool)>>> = OnceLock::new();
     let cache = ASKED.get_or_init(Default::default);
     let known = cache.lock().unwrap_or_else(|e| e.into_inner()).get(q).filter(|(at, _)| at.elapsed() < Duration::from_secs(120)).map(|x| x.1);
@@ -675,17 +762,17 @@ async fn mine(State(app): State<Arc<App>>, user: User) -> Res<Json<Value>> {
 }
 
 /// The user's incoming share `id`: its peer, the owner's id for it, its secret.
-fn incoming(app: &App, user: &User, id: i64) -> Res<(Peer, i64, String, String)> {
+async fn incoming(app: &App, user: &User, id: i64) -> Res<(Peer, i64, String, String)> {
     let row: Option<(String, i64, String, String)> = app.db.opt(|c| {
         c.query_row("SELECT peer, remote_id, secret, name FROM fed_in WHERE id = ?1 AND user_id = ?2", params![id, user.id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))
     })?;
     let (peer, remote, secret, name) = row.ok_or_else(AppError::not_found)?;
-    let p = peers(app).into_iter().find(|p| p.base == peer).ok_or_else(|| AppError::bad("this instance no longer federates with the one it came from"))?;
+    let p = peer_at(app, &peer).await.ok_or_else(|| AppError::bad("this instance no longer federates with the one it came from"))?;
     Ok((p, remote, secret, name))
 }
 
 async fn drop_incoming(State(app): State<Arc<App>>, user: User, Path(id): Path<i64>) -> Res<Json<Value>> {
-    let told = match incoming(&app, &user, id) {
+    let told = match incoming(&app, &user, id).await {
         Ok((p, remote, _, _)) => match call(&app, &p, Method::POST, &format!("/shares/{remote}/decline"), Some(&json!({})), None, &[]).await {
             Ok(r) if r.status().is_success() => true,
             _ => false,
@@ -707,7 +794,7 @@ fn passed(status: u16) -> StatusCode {
 }
 
 async fn in_ls(State(app): State<Arc<App>>, user: User, Path(id): Path<i64>, Query(q): Query<PathQ>) -> Res<Response> {
-    let (p, remote, secret, _) = incoming(&app, &user, id)?;
+    let (p, remote, secret, _) = incoming(&app, &user, id).await?;
     let rel = format!("/shares/{remote}/ls?path={}", utf8_percent_encode(&q.path, ENC));
     let r = call(&app, &p, Method::GET, &rel, None, Some(&secret), &[]).await.map_err(AppError::bad)?;
     if !r.status().is_success() {
@@ -720,7 +807,7 @@ async fn in_ls(State(app): State<Arc<App>>, user: User, Path(id): Path<i64>, Que
 }
 
 async fn in_raw(State(app): State<Arc<App>>, user: User, Path(id): Path<i64>, Query(q): Query<PathQ>, headers: HeaderMap) -> Res<Response> {
-    let (p, remote, secret, _) = incoming(&app, &user, id)?;
+    let (p, remote, secret, _) = incoming(&app, &user, id).await?;
     let mut rel = format!("/shares/{remote}/raw?path={}", utf8_percent_encode(&q.path, ENC));
     if q.dl.is_some() {
         rel.push_str("&dl=1");
@@ -753,7 +840,7 @@ async fn revoke_outgoing(State(app): State<Arc<App>>, user: User, Path(id): Path
         .opt(|c| c.query_row("SELECT peer FROM fed_out WHERE id = ?1 AND owner_id = ?2", params![id, user.id], |r| r.get(0)))?
         .ok_or_else(AppError::not_found)?;
     app.db.with(|c| c.execute("DELETE FROM fed_out WHERE id = ?1 AND owner_id = ?2", params![id, user.id]))?;
-    let told = match peers(&app).into_iter().find(|p| p.base == peer) {
+    let told = match peer_at(&app, &peer).await {
         Some(p) => matches!(call(&app, &p, Method::POST, &format!("/shares/{id}/revoke"), Some(&json!({})), None, &[]).await, Ok(r) if r.status().is_success()),
         None => false,
     };
@@ -786,6 +873,7 @@ async fn admin_view(State(app): State<Arc<App>>, _a: Admin) -> Res<Json<Value>> 
     Ok(Json(json!({
         "base": me, "upn_domain": users::upn_domain(&app), "discovery": me.as_ref().map(|b| format!("{b}{WELL_KNOWN}")),
         "who": me.as_ref().map(|b| format!("{b}{API}/who/<upn>")), "peers": out, "incoming": counts.0, "outgoing": counts.1,
+        "open": open(&app), "blocked": blocked(&app),
     })))
 }
 
@@ -839,4 +927,59 @@ async fn remove_peer(State(app): State<Arc<App>>, Admin(a): Admin, Path(host): P
     let (i, o) = app.db.with(|c| Ok((c.execute("DELETE FROM fed_in WHERE peer = ?1", [&p.base])?, c.execute("DELETE FROM fed_out WHERE peer = ?1", [&p.base])?)))?;
     tracing::info!(peer = %p.base, by = %a.username, "federation: an instance removed");
     Ok(Json(json!({ "ok": true, "incoming_removed": i, "outgoing_removed": o })))
+}
+
+/* ---- open federation's settings (Round 24) ---- */
+
+#[derive(Deserialize)]
+struct OpenReq {
+    open: bool,
+}
+
+async fn set_open(State(app): State<Arc<App>>, Admin(a): Admin, Json(req): Json<OpenReq>) -> Res<Json<Value>> {
+    db::set_setting(&app.db, "fed_open", if req.open { "1" } else { "0" })?;
+    tracing::info!(open = req.open, by = %a.username, "federation: open federation set");
+    Ok(Json(json!({ "open": req.open })))
+}
+
+#[derive(Deserialize)]
+struct BlockReq {
+    host: String,
+}
+
+fn save_blocked(app: &App, list: &[String]) -> Res<()> {
+    db::set_setting(&app.db, "fed_blocked", &serde_json::to_string(list).map_err(AppError::internal)?)
+}
+
+async fn block(State(app): State<Arc<App>>, Admin(a): Admin, Json(req): Json<BlockReq>) -> Res<Json<Value>> {
+    let mut h = req.host.trim().trim_end_matches('/').to_ascii_lowercase();
+    if let Some(x) = h.split("://").nth(1) {
+        h = x.to_string();
+    }
+    if let Some(i) = h.find('/') {
+        h.truncate(i);
+    }
+    if !crate::placement::valid_host(&h) || !h.contains('.') {
+        return Err(AppError::bad("give a host name: osada.example.org (its subdomains are blocked too)"));
+    }
+    let mut list = blocked(&app);
+    if !list.contains(&h) {
+        list.push(h.clone());
+        list.sort();
+    }
+    save_blocked(&app, &list)?;
+    tracing::info!(host = %h, by = %a.username, "federation: an instance blocked");
+    Ok(Json(json!({ "blocked": list })))
+}
+
+async fn unblock(State(app): State<Arc<App>>, Admin(a): Admin, Path(host): Path<String>) -> Res<Json<Value>> {
+    let mut list = blocked(&app);
+    let before = list.len();
+    list.retain(|b| *b != host);
+    if list.len() == before {
+        return Err(AppError::not_found());
+    }
+    save_blocked(&app, &list)?;
+    tracing::info!(host = %host, by = %a.username, "federation: an instance unblocked");
+    Ok(Json(json!({ "blocked": list })))
 }

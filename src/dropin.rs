@@ -249,7 +249,26 @@ async fn publish_oidc_clients(node: Arc<Node>, db: Arc<osada1::db::Db>) {
             })?;
             rows.collect::<Result<std::collections::BTreeMap<_, _>, _>>()
         });
-        let Ok(want) = rows else { continue };
+        let Ok(mut want) = rows else { continue };
+        // Round 24: the webmail osada-setup mail installs in Stalwart signs in as `maildot` (Stalwart's
+        // OIDC directory asks for that audience): a public client for everyone, made once a mail
+        // instance has a name; kept as the admin then changes it
+        let mail = crate::placement::ModuleKind::Data(crate::placement::Domain::Mail);
+        let host = node.cluster_state().placement.modules.values().find(|m| m.kind == mail).and_then(|m| m.host.clone());
+        if let (Some(host), false) = (host, want.contains_key("maildot")) {
+            let uri = format!("https://{host}/maildot/");
+            let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0);
+            let made = db.with(|c| {
+                c.execute("INSERT INTO oidc_clients (name, secret_hash, redirect_uris, users, created) VALUES ('maildot', NULL, ?1, '', ?2)", rusqlite::params![uri, now])
+            });
+            match made {
+                Ok(_) => {
+                    println!("{}: OIDC client maildot made for the webmail ({uri})", node.me());
+                    want.insert("maildot".into(), crate::oidc::Client { secret_hash: None, redirect_uris: vec![uri], users: vec![] });
+                }
+                Err(e) => eprintln!("{}: OIDC client maildot: {e:?}", node.me()),
+            }
+        }
         let have = node.cluster_state().oidc_clients;
         let mut cmds: Vec<crate::cluster::Command> = want
             .iter()
@@ -466,8 +485,8 @@ impl Bridge for NodeBridge {
     }
 
     fn mail_host(&self) -> Option<String> {
-        let name = MAIL_INSTANCE.get()?;
-        self.0.cluster_state().placement.modules.get(name)?.host.clone()
+        let name = self.mail_instance()?;
+        self.0.cluster_state().placement.modules.get(&name)?.host.clone()
     }
 
     fn may_use_mail(&self, sub: &str, _module: &str) -> bool {
@@ -479,9 +498,13 @@ impl Bridge for NodeBridge {
     }
 
     fn mail_instance(&self) -> Option<String> {
-        let name = MAIL_INSTANCE.get()?;
         let p = self.0.cluster_state().placement;
-        p.modules.get(name).is_some_and(|m| m.kind == crate::placement::ModuleKind::Data(crate::placement::Domain::Mail)).then(|| name.clone())
+        let mail = crate::placement::ModuleKind::Data(crate::placement::Domain::Mail);
+        match MAIL_INSTANCE.get() {
+            Some(name) => p.modules.get(name).is_some_and(|m| m.kind == mail).then(|| name.clone()),
+            // Round 24: the one osada-setup mail made (web import), when the env named none
+            None => p.modules.iter().find(|(_, m)| m.kind == mail).map(|(n, _)| n.clone()),
+        }
     }
 
     fn proxies(&self) -> Vec<osada1::apptab::ProxyDef> {

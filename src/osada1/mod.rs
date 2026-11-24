@@ -4,6 +4,7 @@
 //! listener. Its storage stays as it was (shelf.db, plain files).
 
 pub mod api;
+pub mod apppw;
 pub mod assets;
 pub mod auth;
 pub mod backup;
@@ -304,6 +305,7 @@ pub async fn run(mut app: App, extra: Option<Extra>) -> anyhow::Result<()> {
         .merge(api::routes())
         .merge(oidc::routes())
         .merge(mail::routes())
+        .merge(apppw::routes())
         .merge(apptab::routes())
         .merge(wiki::routes())
         .merge(public::routes())

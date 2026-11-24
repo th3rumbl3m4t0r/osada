@@ -66,11 +66,14 @@ try:
     pl['modules']['mail'] = {'kind': 'mail', 'title': 'mail', 'node': me_id, 'host': 'mail.example.org', 'upstream': 'tls://127.0.0.1:4430'}
     s, body = api('POST', '/api/admin/placement', pl)
     ok(s == 200, f'a mail module with its name (mail.example.org) ({s} {str(body)[:200]})')
-    # the account a mail address, as the mail server's sync gives it (no mail instance here)
-    api('GET', '/api/me')
-    dbs = [os.path.join(dp, f) for dp, _, fs in os.walk(T + '/data') for f in fs if f == 'shelf.db']
-    for db in dbs:
-        subprocess.run([SQLITE, db, f"UPDATE users SET mail = 'x-admin@example.org' WHERE username = '{USER}'"], capture_output=True)
+    # Round 24: a mail module is the mail instance (osada-setup mail makes one), so access to it
+    # decides who has the webmail (D-U16): the administrator gets a mailbox and access
+    s, us = api('POST', '/api/admin/table/users', {'limit': 50, 'params': {}})
+    uid = {r['name']: r['id'] for r in us['rows']} if s == 200 else {}
+    s, body = api('POST', '/api/admin/mail/action', {'op': 'mailbox_set', 'user': uid.get(USER), 'address': 'x-admin@example.org'})
+    ok(s == 200, f'a mailbox x-admin@example.org ({s} {str(body)[:200]})')
+    s, body = api('POST', '/api/admin/access', {'module': 'mail', 'subject': {'kind': 'user', 'id': uid.get(USER)}})
+    ok(s == 200, f'access to the mail instance ({s} {str(body)[:200]})')
     s, me = api('GET', '/api/me')
     mail = [a for a in (me.get('apps') or []) if a.get('name') == 'mail'] if s == 200 else []
     ok(mail and mail[0].get('account') == 'https://mail.example.org/account/', f'/api/me: the mail app with its account pages ({mail})')

@@ -302,6 +302,12 @@ async fn logout(State(app): State<Arc<App>>, remote: Option<Extension<Remote>>, 
 
 /// The mail server's own pages for an account, on the webmail's server (Stalwart's /account/: app
 /// passwords for mail programs, encryption at rest; T6).
+/// The webmail: OSADA_MAILDOT_URL, else (Round 24) the one osada-setup mail installs in Stalwart,
+/// at the mail instance's name.
+fn maildot_url(app: &App) -> Option<String> {
+    app.cfg.maildot_url.clone().or_else(|| app.bridge.as_ref().and_then(|b| b.mail_host()).map(|h| format!("https://{h}/maildot/")))
+}
+
 fn mail_account_url(maildot: &str) -> Option<String> {
     let (scheme, rest) = maildot.split_once("://")?;
     let host = rest.split(['/', '?', '#']).next().filter(|h| !h.is_empty())?;
@@ -317,9 +323,9 @@ async fn me(State(app): State<Arc<App>>, remote: Option<Extension<Remote>>, head
     let maildot = match app.bridge.as_ref().and_then(|b| b.mail_instance().map(|i| (b.clone(), i))) {
         Some((b, i)) => {
             let sub: Option<String> = app.db.with(|c| c.query_row("SELECT sub FROM users WHERE id = ?1", [user.id], |r| r.get(0)))?;
-            sub.is_some_and(|s| b.may_use_mail(&s, &i)).then(|| app.cfg.maildot_url.clone()).flatten()
+            sub.is_some_and(|s| b.may_use_mail(&s, &i)).then(|| maildot_url(&app)).flatten()
         }
-        None => mail.and(app.cfg.maildot_url.clone()),
+        None => mail.and(maildot_url(&app)),
     };
     let proxies = apptab::usable(&app, user.id)?;
     // the apps of the header and the portal (D-U12, D-U13): name, title, where, a line on what it is
@@ -368,6 +374,8 @@ async fn me(State(app): State<Arc<App>>, remote: Option<Extension<Remote>>, head
         "office": app.bridge.as_ref().and_then(|b| b.office()),
         // inside osada 0.2: its account page, and the admin portal for those with a role
         "portal": app.bridge.is_some(),
+        // the header's "osada // <instance>" (Round 24)
+        "instance": upn_domain(&app),
         "staff": staff,
     })))
 }

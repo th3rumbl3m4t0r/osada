@@ -237,6 +237,29 @@ impl Node {
             }
         }
 
+        // `"mail": {"host", "node", "upstream"}` (Round 24, osada-setup mail): the mail instance on that
+        // node, made when the cluster has none with that name
+        let mut set_mail = false;
+        if let Some(v) = all.remove("mail") {
+            let host = v["host"].as_str().unwrap_or("").trim().to_ascii_lowercase();
+            if !crate::placement::valid_host(&host) || !host.contains('.') {
+                return Err(format!("mail.host: {host:?} is not a host name"));
+            }
+            // no node: the one asked (osada-setup mail runs on the mail node)
+            let on = v["node"].as_str().unwrap_or("");
+            let node = if on.is_empty() { self.me.clone() } else { p.resolve_node(on).ok_or_else(|| format!("mail.node: no node {on}"))? };
+            let upstream = v["upstream"].as_str().unwrap_or("tls://127.0.0.1:8443").to_string();
+            let kind = crate::placement::ModuleKind::Data(crate::placement::Domain::Mail);
+            if !p.modules.values().any(|m| m.kind == kind && m.host.as_deref() == Some(host.as_str())) {
+                let name = if p.modules.contains_key("mail") { format!("mail-{}", p.node_label(&node)) } else { "mail".to_string() };
+                let mut m = crate::placement::Module::new(kind, "Mail", node);
+                m.host = Some(host);
+                m.upstream = Some(upstream);
+                p.modules.insert(name, m);
+                set_mail = true;
+            }
+        }
+
         // `"certs": {"<name>": {"names", "issuer", "copies"}}`: set (replaced) in node control (D-U26)
         let certs: BTreeMap<String, Cert> = match all.remove("certs") {
             Some(v) => serde_json::from_value(v).map_err(|e| format!("certs: {e}"))?,
@@ -284,11 +307,19 @@ impl Node {
                 added.push(name);
             }
         }
-        if !added.is_empty() || !replaced.is_empty() || !set_certs.is_empty() || !set_nodes.is_empty() {
+        if !added.is_empty() || !replaced.is_empty() || !set_certs.is_empty() || !set_nodes.is_empty() || set_mail {
             self.set_placement(&Actor::node(&self.me), p).await?;
         }
         let list = |v: &Vec<String>| if v.is_empty() { "none".to_string() } else { v.join(", ") };
-        Ok(format!("added {}; replaced {}; there already: {}; certificates set: {}; nodes set: {}", list(&added), list(&replaced), list(&kept), list(&set_certs), list(&set_nodes)))
+        Ok(format!(
+            "added {}; replaced {}; there already: {}; certificates set: {}; nodes set: {}; mail instance: {}",
+            list(&added),
+            list(&replaced),
+            list(&kept),
+            list(&set_certs),
+            list(&set_nodes),
+            if set_mail { "made" } else { "unchanged" }
+        ))
     }
 }
 

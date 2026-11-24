@@ -1,5 +1,5 @@
-"""The header (Round 20) in headless Chromium on a drop-in (tests/dropin-ui.sh): "portal // home
-files shared …" looks the same on osada 0.2's pages and osada 0.1's (the portal and the files):
+"""The header (Round 20) in headless Chromium on a drop-in (tests/dropin-ui.sh): "osada // <instance>
+files shared …" (Round 24; "portal // <node>" before) looks the same on osada 0.2's pages and osada 0.1's (the portal and the files):
 the portal's block no wider when it is the page, "// <node>" on the same line as the apps' names
 (not higher), as far from the portal as the apps from each other, and further from the first app.
 
@@ -47,7 +47,7 @@ try:
         print("   gaps", gaps(pages[path]))
     for path, items in pages.items():
         by = {i["text"].split(" ")[0] if not i["text"].startswith("//") else "node": i for i in items}
-        node, portal = by.get("node"), by.get("portal")
+        node, portal = by.get("node"), by.get("osada")
         apps = [i for i in items if "app" in i["cls"].split()]
         check(f"{path}: portal, the node, apps", node and portal and len(apps) >= 2, items)
         if not (node and portal and len(apps) >= 2):
@@ -61,12 +61,12 @@ try:
         check(f"{path}: the first app further from the node than from the next app", after_node >= between_apps + 4, (after_node, between_apps))
         check(f"{path}: the node as far from portal as the apps from each other", abs(before_node - between_apps) <= 1.5, (before_node, between_apps))
     # the portal's block the same on every page (on or not), the node where it was
-    p0 = {k: [i for i in v if i["text"] == "portal"][0] for k, v in pages.items()}
+    p0 = {k: [i for i in v if i["text"] == "osada"][0] for k, v in pages.items()}
     widths = {k: v["box"][1] - v["box"][0] for k, v in p0.items()}
     check("portal: as wide on every page", max(widths.values()) - min(widths.values()) <= 2, widths)
     n0 = {k: [i for i in v if i["text"].startswith("//")][0]["letters"][0] for k, v in pages.items()}
     check("'// node' at the same place on every page", max(n0.values()) - min(n0.values()) <= 2, n0)
-    fonts = {k: [i["font"] for i in v if i["text"] == "portal"][0] for k, v in pages.items()}
+    fonts = {k: [i["font"] for i in v if i["text"] == "osada"][0] for k, v in pages.items()}
     check("the same font on every page", len(set(fonts.values())) == 1, fonts)
     check("no page errors", not [e for e in b.errors if "401" not in e], b.errors)
 finally:

@@ -618,6 +618,8 @@ async fn me(State(app): State<Arc<App>>, Entry(via): Entry, headers: HeaderMap) 
         // when that is another (the edge that relayed it)
         "node": app.node.me(),
         "node_name": p.node_label(app.node.me()),
+        // the header's "osada // <instance>" (Round 24): the instance's name, its UPN domain
+        "instance": app.node.upn_domain().filter(|d| !d.is_empty()).unwrap_or_else(|| p.node_label(app.node.me())),
         "via": via,
         "via_name": via.as_ref().map(|v| p.node_label(v)),
         "files": app.opts.files,

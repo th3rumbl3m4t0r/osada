@@ -9,27 +9,36 @@ site, url, fpr = sys.argv[1], sys.argv[2].rstrip("/"), sys.argv[3]
 e = html.escape
 
 
-def rpms(el):
-    d = os.path.join(site, f"el{el}", "x86_64")
-    out = []
-    for f in sorted(os.listdir(d)) if os.path.isdir(d) else []:
-        m = re.match(r"(.+)-([^-]+)-([^-]+)\.(x86_64|noarch)\.rpm$", f)
-        if m:
-            out.append((m.group(1), m.group(2), m.group(3), f, os.path.getsize(os.path.join(d, f))))
-    return out
-
-
 def size(n):
     return f"{n / 1048576:.1f} MB" if n >= 1048576 else f"{n / 1024:.0f} kB"
 
 
+def listing(rel, pattern):
+    d = os.path.join(site, rel)
+    out = []
+    for root, _, files in os.walk(d):
+        for f in sorted(files):
+            m = re.match(pattern, f)
+            if m:
+                p = os.path.join(root, f)
+                out.append((m.group(1), m.group(2), os.path.relpath(p, site), os.path.getsize(p)))
+    return sorted(out)
+
+
+RPM = r"(.+)-([^-]+-[^-]+)\.(?:x86_64|noarch)\.rpm$"
+DEB = r"([^_]+)_([^_]+)_(?:amd64|all)\.deb$"
+groups = [("EL 9", "el9/x86_64", RPM), ("EL 10", "el10/x86_64", RPM)]
+fedora = sorted(os.listdir(os.path.join(site, "fedora"))) if os.path.isdir(os.path.join(site, "fedora")) else []
+groups += [(f"Fedora {v}", f"fedora/{v}/x86_64", RPM) for v in fedora]
+groups += [("Debian, Ubuntu", "deb/pool", DEB)]
 rows = []
-for el in (9, 10):
-    for name, ver, rel, f, n in rpms(el):
-        rows.append(f"<tr><td>EL{el}</td><td>{e(name)}</td><td>{e(ver)}-{e(rel)}</td>"
-                    f"<td><a href=\"el{el}/x86_64/{e(f)}\">{e(f)}</a></td><td>{size(n)}</td></tr>")
+for label, rel, pat in groups:
+    for name, ver, path, n in listing(rel, pat):
+        rows.append(f"<tr><td>{e(label)}</td><td>{e(name)}</td><td>{e(ver)}</td>"
+                    f"<td><a href=\"{e(path)}\">{e(os.path.basename(path))}</a></td><td>{size(n)}</td></tr>")
 tarballs = sorted(os.listdir(os.path.join(site, "tarballs"))) if os.path.isdir(os.path.join(site, "tarballs")) else []
 tb = "".join(f"<li><a href=\"tarballs/{e(t)}\">{e(t)}</a></li>" for t in tarballs)
+u = e(url)
 
 print(f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
@@ -56,35 +65,47 @@ a {{ color: var(--acc); }}
 <h1><span>osada</span> packages</h1>
 <p class="lead">Self-hosted files, wiki, sign-in and groupware for a household or an organisation:
 on one machine, or a first node at home with edges in the cloud.</p>
+<p>Everything here is signed with one key, fingerprint <span class="fpr">{e(fpr)}</span>
+(<a href="RPM-GPG-KEY-osada">armored</a>, <a href="osada.gpg">binary for apt</a>). As root:</p>
 
-<h2>Rocky Linux, AlmaLinux, RHEL 9 and 10</h2>
-<pre><code>curl -fsSL -o /etc/yum.repos.d/osada.repo {e(url)}/osada.repo
+<h2>Rocky Linux, AlmaLinux, RHEL, CentOS Stream 9 and 10</h2>
+<pre><code>curl -fsSL -o /etc/yum.repos.d/osada.repo {u}/osada.repo
 dnf install -y osada</code></pre>
-<p>dnf asks once to trust the key <a href="RPM-GPG-KEY-osada">RPM-GPG-KEY-osada</a>, fingerprint
-<span class="fpr">{e(fpr)}</span>. Then make the node:</p>
-<pre><code># one VM in the cloud: the first node and its edge, a certificate for your name
-osada-setup first --name home --edge --public-name osada.example.org --firewall
 
-# or: the first node at home …
-osada-setup first --name home --firewall
-osada-setup token --name edge --at &lt;the cloud VM's address&gt;
-# … and on the cloud VM (dnf install osada there first) the line it prints:
-osada-setup node --name edge --token osada-join.… --edge --firewall</code></pre>
-<p>Then point your name's DNS at the edge, open <code>https://osada.example.org/</code> and sign in as
-<code>admin</code> (the password: <code>cat /var/lib/osada/node/first-admin</code>).</p>
+<h2>Fedora {e(", ".join(fedora)) or ""}</h2>
+<pre><code>curl -fsSL -o /etc/yum.repos.d/osada.repo {u}/osada-fedora.repo
+dnf install -y osada</code></pre>
+
+<h2>Debian 12, 13; Ubuntu 22.04, 24.04, 26.04</h2>
+<pre><code>apt-get update &amp;&amp; apt-get install -y curl ca-certificates
+curl -fsSL -o /usr/share/keyrings/osada.gpg {u}/osada.gpg
+curl -fsSL -o /etc/apt/sources.list.d/osada.sources {u}/osada.sources
+apt-get update &amp;&amp; apt-get install -y osada</code></pre>
+
+<h2>Then make the node</h2>
+<pre><code># one machine: the first node and an edge, a certificate for your name
+osada-setup first --edge --public-name osada.example.org --firewall
+
+# more machines, anywhere: on the first node …
+osada-setup token --name edge2 --at &lt;its address&gt;
+# … and on that machine (osada installed there first) the line it prints:
+osada-setup node --name edge2 --token osada-join.… --edge --firewall</code></pre>
+<p>Then point your name's DNS at the edges, open <code>https://osada.example.org/</code> and sign in as
+<code>admin</code> (the password: <code>cat /var/lib/osada/node/first-admin</code>).
+<code>--firewall</code> opens the ports in firewalld or ufw, whichever runs.</p>
 
 <h2>Mail</h2>
-<pre><code>dnf install -y osada-mail        # Stalwart, the mail server
+<pre><code>dnf install -y osada-mail        # or: apt-get install -y osada-mail (Stalwart, the mail server)
 osada-setup mail --firewall</code></pre>
-<p>then admin → modules (a module of kind mail on that node) and admin → mail.</p>
+<p>It sets up Stalwart, its certificate and DKIM, the webmail (<code>https://mail.&lt;domain&gt;/maildot/</code>, signing in with osada) and the mail instance, and prints the DNS records to publish.</p>
 
 <h2>The whole guide</h2>
 <p><a href="INSTALL.md">INSTALL.md</a>: every way to start (one VM; home and an edge; more nodes),
-mail, certificates, upgrading (<code>dnf upgrade osada</code>), where things are, removing.</p>
+mail, certificates, upgrading, where things are, removing.</p>
 
 <h2>Other Linux systems</h2>
-<p>Debian 12, Ubuntu 22.04 and newer, Fedora (x86_64, glibc 2.34+): the tarball has the same
-program and <code>./osada-setup</code>; signed (<code>.asc</code>) with the same key.</p>
+<p>Any x86_64 Linux with systemd and glibc 2.34 or newer: the tarball has the same program and
+<code>./osada-setup</code>; signed (<code>.asc</code>) with the same key.</p>
 <ul>{tb}</ul>
 
 <h2>Packages</h2>

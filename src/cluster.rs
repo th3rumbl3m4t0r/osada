@@ -281,6 +281,11 @@ impl Cluster {
         me.name = name;
         p.nodes.insert(node.clone(), me);
         p.ous.insert(ROOT_OU, Ou::new("organisation", None));
+        // a new cluster's OUs besides the root (Round 24): people, sites, programs; admin → OUs makes more
+        for (id, name) in [(2, "users"), (3, "web"), (4, "services")] {
+            p.ous.insert(OuId(id), Ou::new(name, Some(ROOT_OU)));
+        }
+        p.web_ou = Some(OuId(3));
         for d in Domain::ALL.into_iter().filter(|&d| d != Domain::Ledger) {
             p.defaults.insert(d, node.clone());
         }

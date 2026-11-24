@@ -238,7 +238,7 @@ struct ShareReq {
 async fn create_share(State(app): State<Arc<App>>, user: User, Json(req): Json<ShareReq>) -> Res<Json<Value>> {
     let (t, is_dir) = own_item(&app, &user, &req.loc, &req.path).await?;
     // someone of a federated instance (Round 22): view-only, by their instance
-    if crate::osada1::users::find_person(&app, &req.user).is_none() && crate::osada1::federation::peer_for(&app, req.user.trim()).is_some() {
+    if crate::osada1::users::find_person(&app, &req.user).is_none() && crate::osada1::federation::peer_for(&app, req.user.trim()).await.is_some() {
         return Ok(Json(crate::osada1::federation::offer(&app, &user, &t, is_dir, &req.user).await?));
     }
     // a user name, or (Round 21) a UPN or another address of theirs
